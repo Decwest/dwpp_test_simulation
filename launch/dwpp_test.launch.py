@@ -10,7 +10,7 @@ from launch.actions import (
     AppendEnvironmentVariable,
 )
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PythonExpression
+from launch.substitutions import LaunchConfiguration, Command, PythonExpression
 from nav2_common.launch import LaunchConfigAsBool
 from launch_ros.actions import Node
 
@@ -30,6 +30,9 @@ def generate_launch_description() -> LaunchDescription:
     bridge_yaml = LaunchConfiguration('bridge_yaml')
     rviz_config = LaunchConfiguration('rviz_config')
     params_file = LaunchConfiguration('params_file')
+    default_urdf_xacro  = os.path.join(sim_dir, 'urdf', 'turtlebot3_waffle.urdf')
+    urdf_xacro    = LaunchConfiguration('urdf_xacro')
+    
 
     # ====== Declare Arguments ======
     declare_namespace = DeclareLaunchArgument(
@@ -44,7 +47,7 @@ def generate_launch_description() -> LaunchDescription:
     
     declare_world = DeclareLaunchArgument(
         'world',
-        default_value="empty.sdf",
+        default_value=os.path.join(dwpp_test_dir, 'world', 'empty.sdf'),
         description='World file (SDF)',
     )
     declare_robot_name = DeclareLaunchArgument(
@@ -67,6 +70,8 @@ def generate_launch_description() -> LaunchDescription:
         'rviz_config', default_value=default_rviz,
         description='RViz config file'
     )
+    declare_urdfx  = DeclareLaunchArgument('urdf_xacro',  default_value=default_urdf_xacro,  description='TB3 xacro for RSP')
+    
 
     # ====== Gazebo GUI起動（GUIのみ） ======
     # gz_sim.launch.py の引数は文字列で渡すのが確実: "-r -v 4 <world>"
@@ -125,12 +130,23 @@ def generate_launch_description() -> LaunchDescription:
         remappings=[('/tf_static','/tf_static'),('/tf','/tf')],
     )
     
+    robot_description = Command(['xacro ', urdf_xacro, ' namespace:=', "", ' use_sim_time:=', use_sim_time])
+    robot_state_publisher = Node(
+        package='robot_state_publisher',
+        executable='robot_state_publisher',
+        name='robot_state_publisher',
+        output='screen',
+        parameters=[{
+            'robot_description': robot_description,
+            'use_sim_time': use_sim_time
+        }]
+    )
+    
     nav2_navigation = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(nav2_dir, 'launch', 'navigation_launch.py')),
         launch_arguments={'use_sim_time': use_sim_time,
                           'params_file': params_file}.items()
     )
-
 
     # ====== LaunchDescription ======
     ld = LaunchDescription()
@@ -142,6 +158,7 @@ def generate_launch_description() -> LaunchDescription:
     ld.add_action(declare_robot_sdf)
     ld.add_action(declare_yaml)
     ld.add_action(declare_rviz)
+    ld.add_action(declare_urdfx)
 
     ld.add_action(gz_sim)
     ld.add_action(spawn_tb3)
@@ -149,5 +166,6 @@ def generate_launch_description() -> LaunchDescription:
     ld.add_action(rviz)
     ld.add_action(static_map_to_odom)
     ld.add_action(nav2_navigation)
+    ld.add_action(robot_state_publisher)
 
     return ld

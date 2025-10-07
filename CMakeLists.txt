@@ -11,13 +11,12 @@ find_package(ament_cmake REQUIRED)
 # further dependencies manually.
 # find_package(<dependency> REQUIRED)
 
-install(DIRECTORY launch config urdf rviz params
+install(DIRECTORY launch config urdf rviz params world
   DESTINATION share/${PROJECT_NAME}
 )
 
 install(PROGRAMS
   scripts/follow_path_test_gui.py
-  scripts/ground_truth_odom_tf.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
