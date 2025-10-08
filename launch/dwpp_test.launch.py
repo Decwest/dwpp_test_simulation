@@ -59,7 +59,7 @@ def generate_launch_description() -> LaunchDescription:
         description='Robot SDF(Xacro) path for Gazebo spawn',
     )
     
-    default_bridge_yaml = os.path.join(dwpp_test_dir, 'config', 'tf_bridge.yaml')
+    default_bridge_yaml = os.path.join(dwpp_test_dir, 'config', 'ros_gz_bridge.yaml')
     declare_yaml = DeclareLaunchArgument(
         'bridge_yaml', default_value=default_bridge_yaml,
         description='ros_gz_bridge YAML config'
@@ -107,6 +107,9 @@ def generate_launch_description() -> LaunchDescription:
         executable='parameter_bridge',
         name='ros_gz_bridge',
         output='screen',
+        arguments=[
+            "/world/empty/set_pose@ros_gz_interfaces/srv/SetEntityPose"
+        ],
         parameters=[{'config_file': bridge_yaml}],
     )
     
@@ -147,6 +150,15 @@ def generate_launch_description() -> LaunchDescription:
         launch_arguments={'use_sim_time': use_sim_time,
                           'params_file': params_file}.items()
     )
+    
+    gui_node = Node(
+            package='dwpp_test_simulation',
+            executable='follow_path_test_gui.py',
+            name='follow_path_gui',
+            output='screen',
+            emulate_tty=True,
+            parameters=[{'use_sim_time': use_sim_time}]
+        )
 
     # ====== LaunchDescription ======
     ld = LaunchDescription()
@@ -167,5 +179,6 @@ def generate_launch_description() -> LaunchDescription:
     ld.add_action(static_map_to_odom)
     ld.add_action(nav2_navigation)
     ld.add_action(robot_state_publisher)
+    ld.add_action(gui_node)
 
     return ld
