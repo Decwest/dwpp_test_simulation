@@ -42,23 +42,28 @@ controller_server:
       transform_tolerance: 0.1
       use_velocity_scaled_lookahead_dist: true # APP
       min_approach_linear_velocity: 0.05
-      approach_velocity_scaling_dist: 1.0
-      use_collision_detection: true
+      approach_velocity_scaling_dist: 0.6
       max_allowed_time_to_collision_up_to_carrot: 1.0
+      min_distance_to_obstacle: -1.0
       use_regulated_linear_velocity_scaling: true # RPP
       use_cost_regulated_linear_velocity_scaling: true # RPP
+      cost_scaling_dist: 0.6
+      cost_scaling_gain: 1.0
+      inflation_cost_scaling_factor: 3.0
       regulated_linear_scaling_min_radius: 0.9
       regulated_linear_scaling_min_speed: 0.25
       use_fixed_curvature_lookahead: false
-      curvature_lookahead_dist: 1.0
-      use_rotate_to_heading: false
-      rotate_to_heading_min_angle: 0.785
-      max_robot_pose_search_dist: 10.0
+      curvature_lookahead_dist: 0.6
+      use_rotate_to_heading: true
+      rotate_to_heading_min_angle: 3.14 # OFF since DWPP can handle steep curvature
+      use_cancel_deceleration: false
+      cancel_deceleration: 3.2
+      allow_reversing: true
       interpolate_curvature_after_goal: false
-      cost_scaling_dist: 0.3
-      cost_scaling_gain: 1.0
-      inflation_cost_scaling_factor: 3.0
+      use_collision_detection: true
+      stateful: true
       use_dynamic_window: true # DWPP
+      velocity_feedback: "OPEN_LOOP"
 
 velocity_smoother:
   ros__parameters:
@@ -66,7 +71,7 @@ velocity_smoother:
     scale_velocities: False
     feedback: "OPEN_LOOP"
     max_velocity: [0.5, 0.0, 1.0]
-    min_velocity: [-0.0, 0.0, -1.0]
+    min_velocity: [-0.5, 0.0, -1.0]
     max_accel: [0.5, 0.0, 1.0]
     max_decel: [-0.5, 0.0, -1.0]
     odom_topic: "odom"
