@@ -58,7 +58,7 @@ controller_server:
       regulated_linear_scaling_min_speed: 0.10
       use_fixed_curvature_lookahead: false
       curvature_lookahead_dist: 0.6
-      use_rotate_to_heading: false
+      use_rotate_to_heading: true
       rotate_to_heading_min_angle: 3.14 # OFF since DWPP can handle steep curvature
       use_cancel_deceleration: false
       cancel_deceleration: 3.2
@@ -98,7 +98,7 @@ controller_server:
       regulated_linear_scaling_min_speed: 0.10
       use_fixed_curvature_lookahead: false
       curvature_lookahead_dist: 0.6
-      use_rotate_to_heading: false
+      use_rotate_to_heading: true
       rotate_to_heading_min_angle: 3.14 # OFF since DWPP can handle steep curvature
       use_cancel_deceleration: false
       cancel_deceleration: 3.2
@@ -138,7 +138,7 @@ controller_server:
       regulated_linear_scaling_min_speed: 0.10
       use_fixed_curvature_lookahead: false
       curvature_lookahead_dist: 0.6
-      use_rotate_to_heading: false
+      use_rotate_to_heading: true
       rotate_to_heading_min_angle: 3.14 # OFF since DWPP can handle steep curvature
       use_cancel_deceleration: false
       cancel_deceleration: 3.2
@@ -178,7 +178,7 @@ controller_server:
       regulated_linear_scaling_min_speed: 0.10
       use_fixed_curvature_lookahead: false
       curvature_lookahead_dist: 0.6
-      use_rotate_to_heading: false
+      use_rotate_to_heading: true
       rotate_to_heading_min_angle: 3.14 # OFF since DWPP can handle steep curvature
       use_cancel_deceleration: false
       cancel_deceleration: 3.2

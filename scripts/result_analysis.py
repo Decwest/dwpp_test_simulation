@@ -5,33 +5,8 @@ import numpy as np
 from scipy.spatial.distance import cdist
 import math
 from matplotlib import pyplot as plt
-
-filepath = filedialog.askopenfilename(
-        initialdir="/home/decwest/decwest_workspace/ytlab2_hsr/ros2_ws/src/third_party/dwpp_test_simulation/data/hsrb",
-        title="Select a file",
-        filetypes=(("csv files", "*.csv"), ("All files", "*.*"))
-    )
-
-# print("Selected file:", filepath)
-# filepath="/home/decwest/decwest_workspace/ytlab2_hsr/ros2_ws/src/third_party/dwpp_test_simulation/data/hsrb/DWPP_20251121_070133.csv"
-
-# フォルダを与えたら、globで全部抽出するように。で、txtに統計情報を保存
-# globで全部抽出する版も後で作る
-
-df = pd.read_csv(filepath)
-
-# データの読み込み
-t = df["t"].values - df["t"].values[0]  # 開始時間を0に合わせる
-x = df["x"].values
-y = df["y"].values
-robot_path = np.c_[x, y]
-v = df["v"].values
-w = df["w"].values
-cmd_v = df["v_cmd"].values
-cmd_w = df["w_cmd"].values
-v_nav = df["v_nav"].values
-w_nav = df["w_nav"].values
-velocity_violation_flag = df["velocity_violation"].values
+import glob
+import os
 
 # 参照経路の情報
 def step_curves() -> list:
@@ -83,27 +58,72 @@ def calc_violation_rate(violation_flags) -> float:
     violation_rate = violation_count / total_count
     return violation_rate
 
-pathA, pathB, pathC = step_curves()
-rmse_C = calc_rmse(robot_path, pathC)
-violation_rate = calc_violation_rate(velocity_violation_flag)
-print(f"経路追従誤差RMSE (pathC): {rmse_C:.4f} m")
-print(f"違反率: {violation_rate:.4f}")
+# filepath = filedialog.askopenfilename(
+#         initialdir="/home/decwest/decwest_workspace/ytlab2_hsr/ros2_ws/src/third_party/dwpp_test_simulation/data/hsrb",
+#         title="Select a file",
+#         filetypes=(("csv files", "*.csv"), ("All files", "*.*"))
+#     )
 
-# 速度プロファイルの図示
-plt.figure(figsize=(10, 6))
-plt.plot(t, v, label="actual", color='blue')
-plt.plot(t, cmd_v, label="reference", color='red')
-plt.xlabel("Time [s]")
-plt.ylabel("Linear Velocity [m/s]")
-plt.legend()
-plt.grid(True)
-plt.savefig("velocity_profile.png")
+# print("Selected file:", filepath)
+# filepath="/home/decwest/decwest_workspace/ytlab2_hsr/ros2_ws/src/third_party/dwpp_test_simulation/data/hsrb/DWPP_20251121_070133.csv"
 
-plt.figure(figsize=(10, 6))
-plt.plot(t, w, label="actual", color='blue')
-plt.plot(t, cmd_w, label="reference", color='red')
-plt.xlabel("Time [s]")
-plt.ylabel("Angular Velocity [rad/s]")
-plt.legend()
-plt.grid(True)
-plt.savefig("angular_velocity_profile.png")
+# フォルダを与えたら、globで全部抽出するように。で、txtに統計情報を保存
+# globで全部抽出する版も後で作る
+filedir = filedialog.askdirectory(initialdir = "/home/decwest/decwest_workspace/ytlab2_hsr/ros2_ws/src/third_party/dwpp_test_simulation/data/hsrb")
+data_paths = glob.glob(filedir + "/*.csv")
+
+for filepath in data_paths:
+    print("Processing file:", filepath)
+    df = pd.read_csv(filepath)
+    
+    # extract path name
+    path_name = filepath.split("/")[-2]
+    method_name = filepath.split("/")[-1].split("_")[0]
+
+    # データの読み込み
+    t = df["t"].values - df["t"].values[0]  # 開始時間を0に合わせる
+    x = df["x"].values
+    y = df["y"].values
+    robot_path = np.c_[x, y]
+    v = df["v"].values
+    w = df["w"].values
+    cmd_v = df["v_cmd"].values
+    cmd_w = df["w_cmd"].values
+    v_nav = df["v_nav"].values
+    w_nav = df["w_nav"].values
+    velocity_violation_flag = df["velocity_violation"].values
+
+    pathA, pathB, pathC = step_curves()
+    path_dict = {"PathA": pathA, "PathB": pathB, "PathC": pathC}
+    
+    rmse = calc_rmse(robot_path, path_dict[path_name])
+    violation_rate = calc_violation_rate(velocity_violation_flag)
+    print(f"経路追従誤差RMSE ({path_name}): {rmse:.4f} m")
+    print(f"違反率: {violation_rate:.4f}")
+    
+    # txtに書き出し
+    txt_filename = os.path.dirname(filepath) + "/result.txt"
+    with open(txt_filename, "a") as f:
+        f.write(f"Method: {method_name}\n")
+        f.write(f"RMSE: {rmse:.4f} m\n")
+        f.write(f"Violation Rate: {violation_rate:.4f}\n")
+        f.write("\n")
+
+    # 速度プロファイルの図示
+    plt.figure(figsize=(10, 6))
+    plt.plot(t, v, label="actual", color='blue')
+    plt.plot(t, cmd_v, label="reference", color='red')
+    plt.xlabel("Time [s]")
+    plt.ylabel("Linear Velocity [m/s]")
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(f"{os.path.dirname(filepath)}/{method_name}_velocity_profile.png")
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(t, w, label="actual", color='blue')
+    plt.plot(t, cmd_w, label="reference", color='red')
+    plt.xlabel("Time [s]")
+    plt.ylabel("Angular Velocity [rad/s]")
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(f"{os.path.dirname(filepath)}/{method_name}_angular_velocity_profile.png")
