@@ -7,6 +7,9 @@ import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 import numpy as np
+from scipy.spatial.transform import Rotation as R
+import datetime
+import csv
 
 import rclpy
 from rclpy.node import Node
@@ -15,12 +18,16 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy, QoSDurabilityPolicy
 from rclpy.qos import qos_profile_sensor_data
 
-from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
 from nav_msgs.msg import Path, Odometry
 from nav2_msgs.action import FollowPath
 from visualization_msgs.msg import Marker, MarkerArray
+from std_msgs.msg import Bool
 
 from ros_gz_interfaces.srv import SetEntityPose  # Gazebo Sim (Ignition) の set_pose サービス
+
+import os
+from ament_index_python.packages import get_package_share_directory
 
 
 def yaw_to_quat(z_yaw_rad: float):
@@ -74,6 +81,8 @@ class FollowPathClient(Node):
         # parameters
         self.robot_model_name = self.declare_parameter('robot_model_name', "turtlebot3_waffle").value
         self.world_model_name = self.declare_parameter('world_model_name', "empty").value
+        self.record_frequency = self.declare_parameter('record_frequency', 30).value
+        self.data_dir = self.declare_parameter('data_dir', '/tmp').value
 
         # --- QoS（RVizに残るように TRANSIENT_LOCAL） ---
         latched_qos = QoSProfile(
@@ -115,7 +124,17 @@ class FollowPathClient(Node):
         self._recording = False
 
         # /odom 購読（SensorData QoS）
+        self.current_odom = None
         self._odom_sub = self.create_subscription(Odometry, '/odom', self._on_odom, qos_profile_sensor_data)
+        # control serverが出力する速度指令値の保存用
+        self.current_cmd_vel_nav = None
+        self._cmd_vel_nav_sub = self.create_subscription(Twist, '/cmd_vel_nav', self._cmd_vel_nav_callback, 1)
+        # Nav2が出力する速度指令地の保存用
+        self.current_cmd_vel = None
+        self._cmd_vel_sub = self.create_subscription(Twist, '/cmd_vel', self._cmd_vel_callback, 1)
+        # 速度違反フラグの保存用
+        self.current_velocity_violation = False
+        self._velocity_violation_sub = self.create_subscription(Bool, '/constraints_violation_flag', self._velocity_violation_callback, 1)
 
         # Gazebo warp clients
         self._gz_setpose_cli = None  # /world/<world>/set_pose 用
@@ -124,6 +143,88 @@ class FollowPathClient(Node):
         threading.Thread(target=self._auto_publish_initial_pose, daemon=True).start()
         threading.Thread(target=self._auto_warp, daemon=True).start()
         threading.Thread(target=self._periodic_path_publish, daemon=True).start()
+        # 記録用のタイマー割込み
+        self.record_rate = self.create_rate(self.record_frequency)  # 30 Hz
+        threading.Thread(target=self._recording_timer_callback, daemon=True).start()
+
+    def _velocity_violation_callback(self, msg: Bool):
+        self.current_velocity_violation = msg.data
+
+    def _cmd_vel_nav_callback(self, msg: Twist):
+        self.current_cmd_vel_nav = msg
+
+    def _cmd_vel_callback(self, msg: Twist):
+        self.current_cmd_vel = msg
+
+    def _recording_timer_callback(self):
+        self.record_state_dict = {"t": [], "x": [], "y": [], "yaw": [], "v": [], "w": [], "v_cmd": [], "w_cmd": [], "v_nav": [], "w_nav": [], "velocity_violation": []}
+        while rclpy.ok():
+            # aaa
+            if  self.current_cmd_vel_nav is None or self.current_cmd_vel is None or self.current_odom is None:
+                continue
+            
+            if self._recording:
+                # self.get_logger().info(f"Now recording {self._active_traj} trajectory...")
+                
+                # actual position
+                x = self.current_odom.pose.pose.position.x
+                y = self.current_odom.pose.pose.position.y
+                
+                qx = self.current_odom.pose.pose.orientation.x
+                qy = self.current_odom.pose.pose.orientation.y
+                qz = self.current_odom.pose.pose.orientation.z
+                qw = self.current_odom.pose.pose.orientation.w
+                r = R.from_quat([qx, qy, qz, qw])
+                yaw = r.as_euler('xyz')[2]
+                
+                # actual velocity
+                v = self.current_odom.twist.twist.linear.x
+                w = self.current_odom.twist.twist.angular.z
+                
+                # commanded velocity from control server
+                v_cmd = self.current_cmd_vel_nav.linear.x
+                w_cmd = self.current_cmd_vel_nav.angular.z
+                
+                # commanded velocity from Nav2
+                v_nav = self.current_cmd_vel.linear.x
+                w_nav = self.current_cmd_vel.angular.z
+                
+                velocity_violation = self.current_velocity_violation
+                
+                # print(self.get_clock().now().to_msg().sec + self.get_clock().now().to_msg().nanosec * 1e-9)
+                self.record_state_dict["t"].append(self.get_clock().now().to_msg().sec + self.get_clock().now().to_msg().nanosec * 1e-9)
+                self.record_state_dict["x"].append(x)
+                self.record_state_dict["y"].append(y)
+                self.record_state_dict["yaw"].append(yaw)
+                self.record_state_dict["v"].append(v)
+                self.record_state_dict["w"].append(w)
+                self.record_state_dict["v_cmd"].append(v_cmd)
+                self.record_state_dict["w_cmd"].append(w_cmd)
+                self.record_state_dict["v_nav"].append(v_nav)
+                self.record_state_dict["w_nav"].append(w_nav)
+                self.record_state_dict["velocity_violation"].append(velocity_violation)
+                
+            else:
+                # 保存データがあるなら
+                if len(self.record_state_dict["x"]) > 0:
+                    # save to csv file
+                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    dir_name = f"{self.data_dir}/{self.robot_model_name}"
+                    filename = f"{dir_name}/{self._active_traj}_{timestamp}.csv"
+                    if os.path.exists(dir_name) == False:
+                        os.makedirs(dir_name, exist_ok=True)
+                    with open(filename, 'w', newline='') as csvfile:
+                        fieldnames = ["t", "x", "y", "yaw", "v", "w", "v_cmd", "w_cmd", "v_nav", "w_nav", "velocity_violation"]
+                        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                        writer.writeheader()
+                        for i in range(len(self.record_state_dict["x"])):
+                            writer.writerow({field: self.record_state_dict[field][i] for field in fieldnames})
+                    self.get_logger().info(f"Saved trajectory data to '{filename}'")
+                    
+                    # clear the record
+                    self.record_state_dict = {"t": [], "x": [], "y": [], "yaw": [], "v": [], "w": [], "v_cmd": [], "w_cmd": [], "v_nav": [], "w_nav": [], "velocity_violation": []}
+                
+            self.record_rate.sleep()
 
     # ===== RViz 可視化：パス & ラベル =====
     def publish_paths_and_labels(self, path_A: Path, path_B: Path, path_C: Path):
@@ -179,6 +280,7 @@ class FollowPathClient(Node):
 
     # ===== Robot trajectory =====
     def _on_odom(self, msg: Odometry):
+        self.current_odom = msg
         with self._traj_lock:
             # 走行中でなければ記録しない（Warp などはここで無視）
             if not self._recording:
@@ -318,7 +420,7 @@ class FollowPathClient(Node):
     def _periodic_path_publish(self):
         time.sleep(2.0)  # 初期化待ち
         path_A, path_B, path_C = make_path(self._frame_id)
-        while True:
+        while rclpy.ok():
             try:
                 self.publish_paths_and_labels(path_A, path_B, path_C)
                 time.sleep(1.0)
