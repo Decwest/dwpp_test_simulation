@@ -65,12 +65,15 @@ def make_path(frame_id: str):
 
 
 class FollowPathClient(Node):
-    def __init__(self, frame_id: str = "map", world_name: str = "empty"):
+    def __init__(self, frame_id: str = "map"):
         super().__init__('follow_path_gui_client')
         self._client = ActionClient(self, FollowPath, '/follow_path')
         self._current_goal_handle = None
         self._frame_id = frame_id
-        self._world_name = world_name
+        
+        # parameters
+        self.robot_model_name = self.declare_parameter('robot_model_name', "turtlebot3_waffle").value
+        self.world_model_name = self.declare_parameter('world_model_name', "empty").value
 
         # --- QoS（RVizに残るように TRANSIENT_LOCAL） ---
         latched_qos = QoSProfile(
@@ -119,7 +122,7 @@ class FollowPathClient(Node):
 
         # 起動直後：初期姿勢 & tb3 ワープ & パス定期描画
         threading.Thread(target=self._auto_publish_initial_pose, daemon=True).start()
-        threading.Thread(target=self._auto_warp_tb3, daemon=True).start()
+        threading.Thread(target=self._auto_warp, daemon=True).start()
         threading.Thread(target=self._periodic_path_publish, daemon=True).start()
 
     # ===== RViz 可視化：パス & ラベル =====
@@ -269,10 +272,10 @@ class FollowPathClient(Node):
     # ===== Gazebo warp =====
     def _ensure_gazebo_clients(self):
         if self._gz_setpose_cli is None:
-            service_name = f'/world/{self._world_name}/set_pose'
+            service_name = f'/world/{self.world_model_name}/set_pose'
             self._gz_setpose_cli = self.create_client(SetEntityPose, service_name)
 
-    def warp_model(self, model_name: str = 'turtlebot3_waffle', x: float = 0.0, y: float = 0.0, z: float = 0.0, yaw_rad: float = 0.0):
+    def warp_model(self, model_name: str, x: float = 0.0, y: float = 0.0, z: float = 0.0, yaw_rad: float = 0.0):
         # Warp の前に記録OFF（Warp移動は記録しない）
         with self._traj_lock:
             self._recording = False
@@ -280,7 +283,7 @@ class FollowPathClient(Node):
         self._ensure_gazebo_clients()
         _, _, qz, qw = yaw_to_quat(yaw_rad)
         if not self._gz_setpose_cli.wait_for_service(timeout_sec=1.0):
-            self.get_logger().error("Gazebo Sim set_pose service not available. Is ros_gz_bridge running?")
+            self.get_logger().error(f"'/world/{self.world_model_name}/set_pose' service not available. Is ros_gz_bridge running?")
             return False
         # SetEntityPose リクエスト（name 指定 / type=MODEL=2）
         req = SetEntityPose.Request()
@@ -298,17 +301,17 @@ class FollowPathClient(Node):
             try:
                 _ = f.result()
                 self.get_logger().info(
-                    f"Warped '{model_name}' via /world/{self._world_name}/set_pose to ({x:.2f},{y:.2f},{z:.2f})")
+                    f"Warped '{model_name}' via /world/{self.world_model_name}/set_pose to ({x:.2f},{y:.2f},{z:.2f})")
             except Exception as e:
                 self.get_logger().warn(f"set_pose failed: {e}")
         fut.add_done_callback(_done)
         return True
 
-    def _auto_warp_tb3(self):
+    def _auto_warp(self):
         time.sleep(1.5)
         try:
             # 起動直後に turtlebot3_waffle を原点へテレポート
-            self.warp_model('turtlebot3_waffle', 0.0, 0.0, 0.0, 0.0)
+            self.warp_model(self.robot_model_name, 0.0, 0.0, 0.0, 0.0)
         except Exception as e:
             self.get_logger().warn(f"Auto-warp failed: {e}")
 
@@ -391,6 +394,9 @@ class AppGUI:
         self.root.title("FollowPath GUI (Nav2)")
         self.root.geometry("800x400")
         
+        self.robot_model_name = self.node.robot_model_name
+        self.world_model_name = self.node.world_model_name
+        
         # Set larger default font for the whole application
         default_font = ("Arial", 20)
         self.root.option_add("*Font", default_font)
@@ -409,7 +415,7 @@ class AppGUI:
 
         # Buttons row
         btn_row = tk.Frame(self.root); btn_row.pack(pady=(8, 12))
-        tk.Button(btn_row, text="Warp Robot (0,0,0)", font=("Arial", 20, "bold"), command=self._on_warp_tb3).grid(row=0, column=0, padx=8)
+        tk.Button(btn_row, text="Warp Robot (0,0,0)", font=("Arial", 20, "bold"), command=self._on_warp).grid(row=0, column=0, padx=8)
         tk.Button(btn_row, text="Clear Trajectory", font=("Arial", 20, "bold"), command=self._on_clear_traj).grid(row=0, column=1, padx=8)
 
         tk.Label(self.root, text="Paths", font=("Arial", 20)).pack(pady=(10, 4))
@@ -434,11 +440,11 @@ class AppGUI:
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
-    def _on_warp_tb3(self):
+    def _on_warp(self):
         try:
-            ok = self.node.warp_model('turtlebot3_waffle', 0.0, 0.0, 0.0, 0.0)
+            ok = self.node.warp_model(self.robot_model_name, 0.0, 0.0, 0.0, 0.0)
             if not ok:
-                messagebox.showwarning("Warp", "Failed to warp turtlebot3_waffle. Check Gazebo services.")
+                messagebox.showwarning("Warp", f"Failed to warp {self.robot_model_name}. Check Gazebo services.")
         except Exception as e:
             messagebox.showerror("Warp Error", str(e))
 
@@ -477,7 +483,7 @@ def main():
         "Path C (135 deg)": path_C,
     }
 
-    node = FollowPathClient(frame_id=frame_id, world_name=world_name)
+    node = FollowPathClient(frame_id=frame_id)
     # === 安全な executor / spin ===
     executor = MultiThreadedExecutor()
     executor.add_node(node)
