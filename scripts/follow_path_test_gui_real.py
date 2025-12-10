@@ -1,59 +1,111 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+Nav2 FollowPath Test GUI Client
+機能:
+  - 規定のパス生成とNav2への送信 (ActionClient)
+  - 現在のロボット位置を基準としたパス座標変換
+  - ロボットの軌跡、指令値、オドメトリのCSV記録
+  - RViz上の可視化 (Marker)
+  - TkinterによるGUI操作
+"""
+
+# --- Standard Library Imports ---
 import math
 import threading
 import time
-import tkinter as tk
-from tkinter import messagebox, ttk
-import numpy as np
-from scipy.spatial.transform import Rotation as R
 import datetime
 import csv
+import os
+import copy  # オブジェクトのディープコピー用
 
+# --- Third Party Imports ---
+import numpy as np
+from scipy.spatial.transform import Rotation as R
+import tkinter as tk
+from tkinter import messagebox, ttk
+
+# --- ROS 2 Imports ---
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
 from rclpy.executors import MultiThreadedExecutor
-from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy, QoSDurabilityPolicy
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import (
+    QoSProfile,
+    QoSHistoryPolicy,
+    QoSReliabilityPolicy,
+    QoSDurabilityPolicy,
+    qos_profile_sensor_data
+)
 
-from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
+# --- ROS 2 Messages ---
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist, TransformStamped
 from nav_msgs.msg import Path, Odometry
 from nav2_msgs.action import FollowPath
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import Bool
 
-import os
-from ament_index_python.packages import get_package_share_directory
+# --- TF2 Imports ---
+from tf2_ros import TransformException, TransformBroadcaster
+from tf2_ros.buffer import Buffer
+from tf2_ros.transform_listener import TransformListener
 
 
-def yaw_to_quat(z_yaw_rad: float):
+# ==========================================
+# Helper Functions
+# ==========================================
+
+def yaw_to_quat(z_yaw_rad: float) -> tuple:
+    """Yaw角(rad)からクォータニオン(x, y, z, w)を生成する"""
     half = z_yaw_rad * 0.5
     qz = math.sin(half)
     qw = math.cos(half)
     return (0.0, 0.0, qz, qw)
 
 
-def make_path(frame_id: str):
+def make_path(frame_id: str) -> tuple:
+    """
+    実験用の規定パスを生成する関数
+    Returns:
+        (path_A, path_B, path_C): 生成された3種類のPathメッセージ
+    """
     paths = []
+    # 生成するカーブの角度パターン
     theta_list = [np.pi/4, np.pi/2, 3*np.pi/4]
-    l = 3.0
+    l_segment = 3.0  # 直線区間の長さパラメータ
 
     for theta in theta_list:
-        x1 = np.linspace(0, 1, 100);           y1 = np.zeros_like(x1)
-        x2 = np.linspace(1.0, 1.0+l*math.cos(theta), 100)
-        y2 = np.linspace(0.0, l*math.sin(theta), 100)
-        x3 = np.linspace(1.0+l*math.cos(theta), 4.0+l*math.cos(theta), 100)
-        y3 = np.ones_like(x3) * l * math.sin(theta)
+        # 1. 直進 (0 -> 1m)
+        x1 = np.linspace(0, 1, 100)
+        y1 = np.zeros_like(x1)
+        
+        # 2. 斜め直線 (角度thetaで長さl)
+        # Note: 実際には直線補間だが、ここでは簡易的に生成
+        x2 = np.linspace(1.0, 1.0 + l_segment * math.cos(theta), 100)
+        y2 = np.linspace(0.0, l_segment * math.sin(theta), 100)
+        
+        # 3. 終端直進 (さらに3m進む)
+        x3 = np.linspace(
+            1.0 + l_segment * math.cos(theta), 
+            4.0 + l_segment * math.cos(theta), 
+            100
+        )
+        y3 = np.ones_like(x3) * l_segment * math.sin(theta)
 
+        # 結合
         xs = np.concatenate([x1, x2, x3])
         ys = np.concatenate([y1, y2, y3])
-        dx = np.gradient(xs); dy = np.gradient(ys)
+        
+        # 方位角(Yaw)の計算
+        dx = np.gradient(xs)
+        dy = np.gradient(ys)
         yaws = np.unwrap(np.arctan2(dy, dx))
 
+        # Pathメッセージの作成
         path = Path()
         path.header.frame_id = frame_id
+        
         for x, y, yaw in zip(xs, ys, yaws):
             ps = PoseStamped()
             ps.header.frame_id = frame_id
@@ -65,53 +117,42 @@ def make_path(frame_id: str):
             path.poses.append(ps)
         paths.append(path)
 
-    path_A, path_B, path_C = paths
-    return (path_A, path_B, path_C)
+    # 展開して返す
+    return (paths[0], paths[1], paths[2])
 
-def make_iso_path(frame_id: str):
-    pass
+
+# ==========================================
+# Main ROS 2 Node Class
+# ==========================================
 
 class FollowPathClient(Node):
-    def __init__(self, frame_id: str = "map"):
+    """
+    Nav2のFollowPathアクションを呼び出し、実験データを記録・可視化するノード
+    """
+    def __init__(self, path_frame_id: str = "start_pose"):
         super().__init__('follow_path_gui_client')
-        self._client = ActionClient(self, FollowPath, '/follow_path')
-        self._current_goal_handle = None
-        self._frame_id = frame_id
         
-        # parameters
+        # --- Parameters ---
+        self.path_frame_id = path_frame_id
         self.record_frequency = self.declare_parameter('record_frequency', 30).value
         self.data_dir = self.declare_parameter('data_dir', '/tmp').value
-        self.experiment_name = self.declare_parameter('experiment_name', 'dwpp').value # dwpp or nelson
+        self.map_frame_id = self.declare_parameter('map_frame_id', 'map').value
+        self.base_frame_id = self.declare_parameter('base_frame_id', 'base_footprint').value
+        self.experiment_name = self.declare_parameter('experiment_name', 'dwpp').value  # dwpp or nelson
 
-        # --- QoS（RVizに残るように TRANSIENT_LOCAL） ---
-        latched_qos = QoSProfile(
-            depth=1,
-            reliability=QoSReliabilityPolicy.RELIABLE,
-            history=QoSHistoryPolicy.KEEP_LAST,
-            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL
-        )
-
-        # Initial pose publisher (RViz "2D Pose Estimate")
-        self._initpose_pub = self.create_publisher(PoseWithCovarianceStamped, 'initialpose', 10)
-
-        # --- Visualization publishers ---
-        self._label_pub  = self.create_publisher(MarkerArray, '/viz/path_labels', latched_qos)
-        self._path_markers_pub = self.create_publisher(MarkerArray, '/viz/path_markers', latched_qos)
-
-        # Robot trajectory (subscribe odom -> publish Visualization MarkerArray)
-        self._traj_pub = self.create_publisher(MarkerArray, '/viz/robot_trajs', 10)
-        # 手法ごとに点列を保持
-        self._traj_points = {
-            'PP':   [],
-            'APP':  [],
-            'RPP':  [],
-            'DWPP': []
-        }
-        self._active_traj = None          # 現在アクティブな手法名（send_path時に設定）
-        self._traj_frame_id = self._frame_id
+        # --- Internal State Variables ---
+        self._current_goal_handle = None
+        self.path_frame_origin_pose = None
+        self.path_frame_origin_orientation = None
+        self._recording = False
+        self._active_traj = None  # 現在実行中の制御手法名(PP, APP等)
         self._traj_lock = threading.Lock()
 
-        # 手法→色マップ（R,G,B）
+        # データ記録用バッファ
+        self._reset_record_buffer()
+
+        # 軌跡描画用の点列バッファ
+        self._traj_points = {'PP': [], 'APP': [], 'RPP': [], 'DWPP': []}
         self._traj_colors = {
             'PP':   (1.0, 0.0, 0.0),   # red
             'APP':  (0.0, 0.7, 0.2),   # green
@@ -119,391 +160,557 @@ class FollowPathClient(Node):
             'DWPP': (0.8, 0.2, 0.8)    # purple
         }
 
-        # 走行中のみ記録するためのフラグ
-        self._recording = False
-
-        # /odom 購読（実際の速度計測用）（SensorData QoS）
+        # 受信データキャッシュ
         self.current_odom = None
-        self._odom_sub = self.create_subscription(Odometry, '/odom', self._on_odom, qos_profile_sensor_data)
-        # control serverが出力する速度指令値の保存用
-        self.current_cmd_vel_nav = None
-        self._cmd_vel_nav_sub = self.create_subscription(Twist, '/cmd_vel_nav', self._cmd_vel_nav_callback, 1)
-        # Nav2が出力する速度指令地の保存用
-        self.current_cmd_vel = None
-        self._cmd_vel_sub = self.create_subscription(Twist, '/cmd_vel', self._cmd_vel_callback, 1)
-        # 速度違反フラグの保存用
+        self.current_cmd_vel_nav = None  # Control Server出力
+        self.current_cmd_vel = None      # Nav2最終出力
         self.current_velocity_violation = False
-        self._velocity_violation_sub = self.create_subscription(Bool, '/constraints_violation_flag', self._velocity_violation_callback, 1)
-        
-        # その他の情報保存用
 
+        # --- QoS Settings ---
+        # RVizで「後からSubscribeしても見える」ようにするための設定
+        latched_qos = QoSProfile(
+            depth=1,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL
+        )
 
-        # 起動直後：初期姿勢 & パス定期描画
+        # --- TF Components ---
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+        self.tf_broadcaster = TransformBroadcaster(self)
+
+        # --- Action Client ---
+        self._client = ActionClient(self, FollowPath, '/follow_path')
+
+        # --- Publishers ---
+        self._initpose_pub = self.create_publisher(PoseWithCovarianceStamped, 'initialpose', 10)
+        self._label_pub = self.create_publisher(MarkerArray, '/viz/path_labels', latched_qos)
+        self._path_markers_pub = self.create_publisher(MarkerArray, '/viz/path_markers', latched_qos)
+        self._traj_pub = self.create_publisher(MarkerArray, '/viz/robot_trajs', 10)
+
+        # --- Subscribers ---
+        self._odom_sub = self.create_subscription(
+            Odometry, '/odom', self._on_odom, qos_profile_sensor_data)
+        self._cmd_vel_nav_sub = self.create_subscription(
+            Twist, '/cmd_vel_nav', self._cmd_vel_nav_callback, 1)
+        self._cmd_vel_sub = self.create_subscription(
+            Twist, '/cmd_vel', self._cmd_vel_callback, 1)
+        self._velocity_violation_sub = self.create_subscription(
+            Bool, '/constraints_violation_flag', self._velocity_violation_callback, 1)
+
+        # --- Background Threads & Timers ---
+        # 1. 起動時の初期位置合わせ & パス可視化 (別スレッドで実行)
         threading.Thread(target=self._auto_publish_initial_pose, daemon=True).start()
         threading.Thread(target=self._periodic_path_publish, daemon=True).start()
-        # 記録用のタイマー割込み
-        self.record_rate = self.create_rate(self.record_frequency)  # 30 Hz
-        threading.Thread(target=self._recording_timer_callback, daemon=True).start()
 
-    def _velocity_violation_callback(self, msg: Bool):
-        self.current_velocity_violation = msg.data
+        # 2. データ記録ループ (Timer)
+        self.record_rate = self.create_rate(self.record_frequency)
+        threading.Thread(target=self._recording_loop, daemon=True).start()
+
+        # 3. Path FrameのTF配信ループ (Timer)
+        self.path_frame_rate = self.create_rate(100)  # 100 Hz
+        threading.Thread(target=self._broadcast_path_frame_loop, daemon=True).start()
+
+    # =========================================================================
+    # Callbacks (Subscribers)
+    # =========================================================================
+
+    def _on_odom(self, msg: Odometry):
+        self.current_odom = msg
 
     def _cmd_vel_nav_callback(self, msg: Twist):
         self.current_cmd_vel_nav = msg
 
     def _cmd_vel_callback(self, msg: Twist):
         self.current_cmd_vel = msg
-        
-    def _get_robot_pose(self):
-        pass
+    
+    def _velocity_violation_callback(self, msg: Bool):
+        self.current_velocity_violation = msg.data
 
-    def _recording_timer_callback(self):
-        self.record_state_dict = {"t": [], "x": [], "y": [], "yaw": [], "v": [], "w": [], "v_cmd": [], "w_cmd": [], "v_nav": [], "w_nav": [], "velocity_violation": []}
+    # =========================================================================
+    # Data Recording & CSV Logic
+    # =========================================================================
+
+    def _reset_record_buffer(self):
+        """記録用バッファを初期化"""
+        self.record_state_dict = {
+            "t": [], "x": [], "y": [], "yaw": [], 
+            "v": [], "w": [], 
+            "v_cmd": [], "w_cmd": [], 
+            "v_nav": [], "w_nav": [], 
+            "velocity_violation": []
+        }
+
+    def _recording_loop(self):
+        """
+        データ記録用スレッド
+        _recordingフラグがTrueの間、状態をリストに追加し、FalseになったらCSV保存する
+        """
         while rclpy.ok():
-            if  self.current_cmd_vel_nav is None or self.current_cmd_vel is None or self.current_odom is None:
+            # 必要なデータが揃うまでスキップ
+            if (self.current_cmd_vel_nav is None or 
+                self.current_cmd_vel is None or 
+                self.current_odom is None):
+                self.record_rate.sleep()
                 continue
             
             if self._recording:
-                # self.get_logger().info(f"Now recording {self._active_traj} trajectory...")
+                # --- データ取得 ---
+                # 現在位置 (path_frame基準)
+                current_pose, current_orientation = self._get_robot_pose(from_frame=self.path_frame_id)
+                if current_pose is None:
+                    continue
+
+                # RViz軌跡更新
+                self._draw_robot_trajectory(current_pose, self.path_frame_id)
                 
-                # actual position
-                x = self.current_odom.pose.pose.position.x
-                y = self.current_odom.pose.pose.position.y
-                
-                qx = self.current_odom.pose.pose.orientation.x
-                qy = self.current_odom.pose.pose.orientation.y
-                qz = self.current_odom.pose.pose.orientation.z
-                qw = self.current_odom.pose.pose.orientation.w
-                r = R.from_quat([qx, qy, qz, qw])
+                # 姿勢(Yaw)計算
+                r = R.from_quat([
+                    current_orientation.x, current_orientation.y, 
+                    current_orientation.z, current_orientation.w
+                ])
                 yaw = r.as_euler('xyz')[2]
                 
-                # actual velocity
-                v = self.current_odom.twist.twist.linear.x
-                w = self.current_odom.twist.twist.angular.z
-                
-                # commanded velocity from control server
-                v_cmd = self.current_cmd_vel_nav.linear.x
-                w_cmd = self.current_cmd_vel_nav.angular.z
-                
-                # commanded velocity from Nav2
-                v_nav = self.current_cmd_vel.linear.x
-                w_nav = self.current_cmd_vel.angular.z
-                
-                velocity_violation = self.current_velocity_violation
-                
-                # print(self.get_clock().now().to_msg().sec + self.get_clock().now().to_msg().nanosec * 1e-9)
-                self.record_state_dict["t"].append(self.get_clock().now().to_msg().sec + self.get_clock().now().to_msg().nanosec * 1e-9)
-                self.record_state_dict["x"].append(x)
-                self.record_state_dict["y"].append(y)
-                self.record_state_dict["yaw"].append(yaw)
-                self.record_state_dict["v"].append(v)
-                self.record_state_dict["w"].append(w)
-                self.record_state_dict["v_cmd"].append(v_cmd)
-                self.record_state_dict["w_cmd"].append(w_cmd)
-                self.record_state_dict["v_nav"].append(v_nav)
-                self.record_state_dict["w_nav"].append(w_nav)
-                self.record_state_dict["velocity_violation"].append(velocity_violation)
+                # 時間
+                t_now = self.get_clock().now().nanoseconds * 1e-9
+
+                # --- バッファへ追加 ---
+                d = self.record_state_dict
+                d["t"].append(t_now)
+                d["x"].append(current_pose.x)
+                d["y"].append(current_pose.y)
+                d["yaw"].append(yaw)
+                # 実測値
+                d["v"].append(self.current_odom.twist.twist.linear.x)
+                d["w"].append(self.current_odom.twist.twist.angular.z)
+                # 指令値 (Control Server)
+                d["v_cmd"].append(self.current_cmd_vel_nav.linear.x)
+                d["w_cmd"].append(self.current_cmd_vel_nav.angular.z)
+                # 指令値 (Nav2 Final)
+                d["v_nav"].append(self.current_cmd_vel.linear.x)
+                d["w_nav"].append(self.current_cmd_vel.angular.z)
+                # フラグ
+                d["velocity_violation"].append(self.current_velocity_violation)
                 
             else:
-                # 保存データがあるなら
+                # 記録停止中かつバッファにデータがある場合 -> CSV保存
                 if len(self.record_state_dict["x"]) > 0:
-                    # save to csv file
-                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                    dir_name = f"{self.data_dir}/{self.experiment_name}"
-                    filename = f"{dir_name}/{self._active_traj}_{timestamp}.csv"
-                    if os.path.exists(dir_name) == False:
-                        os.makedirs(dir_name, exist_ok=True)
-                    with open(filename, 'w', newline='') as csvfile:
-                        fieldnames = ["t", "x", "y", "yaw", "v", "w", "v_cmd", "w_cmd", "v_nav", "w_nav", "velocity_violation"]
-                        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-                        writer.writeheader()
-                        for i in range(len(self.record_state_dict["x"])):
-                            writer.writerow({field: self.record_state_dict[field][i] for field in fieldnames})
-                    self.get_logger().info(f"Saved trajectory data to '{filename}'")
-                    
-                    # clear the record
-                    self.record_state_dict = {"t": [], "x": [], "y": [], "yaw": [], "v": [], "w": [], "v_cmd": [], "w_cmd": [], "v_nav": [], "w_nav": [], "velocity_violation": []}
+                    self._save_to_csv()
+                    self._reset_record_buffer()
                 
             self.record_rate.sleep()
 
-    # ===== RViz 可視化：パス & ラベル =====
+    def _save_to_csv(self):
+        """記録したバッファをCSVファイルに書き出す"""
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        dir_name = f"{self.data_dir}/{self.experiment_name}"
+        filename = f"{dir_name}/{self._active_traj}_{timestamp}.csv"
+        
+        if not os.path.exists(dir_name):
+            os.makedirs(dir_name, exist_ok=True)
+            
+        with open(filename, 'w', newline='') as csvfile:
+            fieldnames = list(self.record_state_dict.keys())
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            
+            data_len = len(self.record_state_dict["x"])
+            for i in range(data_len):
+                row = {field: self.record_state_dict[field][i] for field in fieldnames}
+                writer.writerow(row)
+                
+        self.get_logger().info(f"Saved trajectory data to '{filename}'")
+
+    # =========================================================================
+    # Action Client Logic (FollowPath)
+    # =========================================================================
+
+    def send_path(self, path_msg: Path, controller_id: str, goal_checker_id: str):
+        """指定されたパスをNav2に送信する"""
+        if not self._client.wait_for_server(timeout_sec=2.0):
+            self.get_logger().error("Action server `/follow_path` not available.")
+            return
+
+        # 1. パスの基準座標系を更新（現在のロボット位置を原点とする）
+        self._update_path_frame_origin()
+        time.sleep(0.5)  # TF反映待ち
+        
+        # 2. 座標変換 (path_frame -> map_frame)
+        # 注意: 元のpath_msgを変更しないようにdeepcopyする
+        transformed_path = copy.deepcopy(path_msg)
+        
+        try:
+            # path_frame -> map_frame の変換を取得
+            tf_stamped = self.tf_buffer.lookup_transform(
+                self.map_frame_id,
+                path_msg.header.frame_id,
+                rclpy.time.Time()
+            )
+        except TransformException as ex:
+            self.get_logger().error(f"Transform error: {ex}")
+            return
+
+        # パス内の全点を変換
+        t_vec = tf_stamped.transform.translation
+        r_quat = tf_stamped.transform.rotation
+        r_tf = R.from_quat([r_quat.x, r_quat.y, r_quat.z, r_quat.w])
+        offset = np.array([t_vec.x, t_vec.y, t_vec.z])
+
+        # Header Frame ID を Map に変更
+        transformed_path.header.frame_id = self.map_frame_id
+
+        for pose_stamped in transformed_path.poses:
+            # 位置の変換
+            p = pose_stamped.pose.position
+            p_vec = np.array([p.x, p.y, p.z])
+            p_new = r_tf.apply(p_vec) + offset
+            
+            pose_stamped.pose.position.x = p_new[0]
+            pose_stamped.pose.position.y = p_new[1]
+            pose_stamped.pose.position.z = p_new[2]
+
+            # 向きの変換
+            q = pose_stamped.pose.orientation
+            r_pose = R.from_quat([q.x, q.y, q.z, q.w])
+            r_new = r_tf * r_pose  # 回転の合成
+            q_new = r_new.as_quat()
+
+            pose_stamped.pose.orientation.x = q_new[0]
+            pose_stamped.pose.orientation.y = q_new[1]
+            pose_stamped.pose.orientation.z = q_new[2]
+            pose_stamped.pose.orientation.w = q_new[3]
+
+        # 3. ゴールの作成と送信
+        goal = FollowPath.Goal()
+        goal.path = transformed_path
+        goal.controller_id = controller_id
+        goal.goal_checker_id = goal_checker_id
+
+        # 記録開始
+        with self._traj_lock:
+            self._active_traj = controller_id
+            self._traj_points[controller_id] = [] # 軌跡リセット
+            self._recording = True
+
+        send_future = self._client.send_goal_async(goal, feedback_callback=self._feedback_cb)
+        send_future.add_done_callback(lambda f: self._goal_response_cb(f, controller_id))
+
+    def _goal_response_cb(self, future, controller_id):
+        goal_handle = future.result()
+        if not goal_handle.accepted:
+            self.get_logger().warn('Goal rejected.')
+            with self._traj_lock:
+                self._recording = False
+            return
+        
+        self.get_logger().info(f'Goal accepted. Controller: {controller_id}')
+        self._current_goal_handle = goal_handle
+        goal_handle.get_result_async().add_done_callback(self._result_cb)
+
+    def _result_cb(self, future):
+        """ゴール到達（または失敗・キャンセル）時の処理"""
+        with self._traj_lock:
+            self._recording = False
+        
+        try:
+            result = future.result()
+            self.get_logger().info(f'Result: status={result.status}')
+        except Exception as e:
+            self.get_logger().error(f'Result callback failed: {e}')
+
+    def cancel_current_goal(self):
+        """実行中のゴールをキャンセル"""
+        if self._current_goal_handle is None:
+            self.get_logger().info('No active goal to cancel.')
+            return
+        
+        self.get_logger().info('Canceling goal...')
+        self._current_goal_handle.cancel_goal_async()
+        with self._traj_lock:
+            self._recording = False
+
+    def _feedback_cb(self, feedback_msg):
+        # ログが多すぎる場合はコメントアウト推奨
+        # self.get_logger().debug(f'Feedback received...')
+        pass
+
+    # =========================================================================
+    # Visualization & TF Logic
+    # =========================================================================
+
+    def _draw_robot_trajectory(self, current_pos, frame_id):
+        """ロボットの軌跡をMarkerArrayとしてPublish"""
+        if self._active_traj not in self._traj_points:
+            return
+        
+        pts = self._traj_points[self._active_traj]
+        
+        # 点の間引き (前回から5cm以上移動していたら追加)
+        if not pts or self._distance_2d(pts[-1], current_pos) > 0.05:
+            pts.append(current_pos)
+            # メモリ節約のため上限を設定
+            if len(pts) > 5000:
+                self._traj_points[self._active_traj] = pts[-2000:]
+
+        # マーカー作成
+        marr = MarkerArray()
+        now = self.get_clock().now().to_msg()
+        mid = 0
+        
+        for name, points in self._traj_points.items():
+            if len(points) < 2:
+                continue
+                
+            r, g, b = self._traj_colors.get(name, (0.5, 0.5, 0.5))
+            
+            m = Marker()
+            m.header.frame_id = frame_id
+            m.header.stamp = now
+            m.ns = 'robot_trajectory'
+            m.id = mid
+            mid += 1
+            m.type = Marker.LINE_STRIP
+            m.action = Marker.ADD
+            m.scale.x = 0.035
+            m.color.r = r; m.color.g = g; m.color.b = b; m.color.a = 0.95
+            
+            # pointsのコピーを渡す
+            m.points = copy.deepcopy(points)
+            marr.markers.append(m)
+
+        self._traj_pub.publish(marr)
+
     def publish_paths_and_labels(self, path_A: Path, path_B: Path, path_C: Path):
-        # Path visualization markers with different colors
+        """規定パスとラベルをRVizに表示"""
         markers = MarkerArray()
-        colors = [(1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)]  # Red, Green, Blue
-        paths = [('Path A', path_A), ('Path B', path_B), ('Path C', path_C)]
+        path_configs = [
+            (path_A, (1.0, 0.0, 0.0), 'Path A'),
+            (path_B, (0.0, 1.0, 0.0), 'Path B'),
+            (path_C, (0.0, 0.0, 1.0), 'Path C')
+        ]
         now = self.get_clock().now().to_msg()
 
-        for mid, ((name, path), color) in enumerate(zip(paths, colors)):
-            if not path.poses:
-                continue
-
-            marker = Marker()
-            marker.header.frame_id = path.header.frame_id
-            marker.header.stamp = now
-            marker.ns = 'path_visualization'
-            marker.id = mid
-            marker.type = Marker.LINE_STRIP
-            marker.action = Marker.ADD
-            marker.scale.x = 0.05  # Line width
-            marker.color.r = color[0]
-            marker.color.g = color[1]
-            marker.color.b = color[2]
-            marker.color.a = 1.0
-
-            for pose_stamped in path.poses:
-                marker.points.append(pose_stamped.pose.position)
-
-            markers.markers.append(marker)
+        # Lines
+        for mid, (path, color, _) in enumerate(path_configs):
+            if not path.poses: continue
+            
+            m = Marker()
+            m.header.frame_id = path.header.frame_id
+            m.header.stamp = now
+            m.ns = 'path_visualization'
+            m.id = mid
+            m.type = Marker.LINE_STRIP
+            m.action = Marker.ADD
+            m.scale.x = 0.05
+            m.color.r = color[0]; m.color.g = color[1]; m.color.b = color[2]; m.color.a = 1.0
+            
+            for ps in path.poses:
+                m.points.append(ps.pose.position)
+            markers.markers.append(m)
 
         self._path_markers_pub.publish(markers)
 
-        # Labels (TEXT_VIEW_FACING)
+        # Labels
         labels = MarkerArray()
-        for mid, (name, p) in enumerate([('PathA', path_A), ('PathB', path_B), ('PathC', path_C)], start=1):
+        for mid, (path, _, name) in enumerate(path_configs, start=100):
             m = Marker()
-            m.header.frame_id = p.header.frame_id
+            m.header.frame_id = path.header.frame_id
             m.header.stamp = now
             m.ns = 'path_labels'
             m.id = mid
             m.type = Marker.TEXT_VIEW_FACING
             m.action = Marker.ADD
-            if p.poses:
-                m.pose.position.x = p.poses[-1].pose.position.x + 0.1
-                m.pose.position.y = p.poses[-1].pose.position.y + 0.1
-            m.pose.position.z = 0.3
+            if path.poses:
+                m.pose.position.x = path.poses[-1].pose.position.x + 0.1
+                m.pose.position.y = path.poses[-1].pose.position.y + 0.1
+                m.pose.position.z = 0.3
             m.scale.z = 0.25
             m.color.r = 1.0; m.color.g = 1.0; m.color.b = 1.0; m.color.a = 1.0
             m.text = name
             labels.markers.append(m)
+            
         self._label_pub.publish(labels)
 
-    # ===== Robot trajectory =====
-    def _on_odom(self, msg: Odometry):
-        self.current_odom = msg
-        with self._traj_lock:
-            # 走行中でなければ記録しない（Warp などはここで無視）
-            if not self._recording:
-                return
-
-            if self._traj_frame_id != msg.header.frame_id:
-                # フレーム変更に追従（全軌跡クリア）
-                for k in self._traj_points:
-                    self._traj_points[k] = []
-                self._traj_frame_id = msg.header.frame_id
-
-            # 追従手法が未選択なら何もしない
-            if self._active_traj not in self._traj_points:
-                return
-
-            current_pos = msg.pose.pose.position
-            pts = self._traj_points[self._active_traj]
-
-            # 間引き（最後の点から5cm以上動いたら追加）
-            if not pts or self._distance_2d(pts[-1], current_pos) > 0.05:
-                pts.append(current_pos)
-                if len(pts) > 5000:
-                    self._traj_points[self._active_traj] = pts[-2000:]
-
-            # 4手法すべてをまとめて MarkerArray で出す
-            marr = MarkerArray()
-            now = msg.header.stamp
-            mid = 0
-            for name, points in self._traj_points.items():
-                if len(points) < 2:
-                    continue
-                r, g, b = self._traj_colors[name]
-                m = Marker()
-                m.header.frame_id = self._traj_frame_id
-                m.header.stamp = now
-                m.ns = 'robot_trajectory'
-                m.id = mid; mid += 1
-                m.type = Marker.LINE_STRIP
-                m.action = Marker.ADD
-                m.scale.x = 0.035
-                m.color.r = r; m.color.g = g; m.color.b = b; m.color.a = 0.95
-                m.points = points.copy()
-                marr.markers.append(m)
-
-            self._traj_pub.publish(marr)
-
-    def _distance_2d(self, p1, p2):
-        dx = p1.x - p2.x
-        dy = p1.y - p2.y
-        return math.sqrt(dx*dx + dy*dy)
-
     def clear_trajectory(self):
+        """描画済み軌跡の消去"""
         with self._traj_lock:
             for k in self._traj_points:
                 self._traj_points[k] = []
 
+        # DELETEALL マーカーを送信
         ma = MarkerArray()
         m = Marker()
         m.action = Marker.DELETEALL
         ma.markers.append(m)
         self._traj_pub.publish(ma)
+        self.get_logger().info("Cleared all robot trajectories.")
 
-        self.get_logger().info("Cleared ALL robot trajectories (PP/APP/RPP/DWPP).")
+    # =========================================================================
+    # Transform Helpers & Utilities
+    # =========================================================================
 
-    # ===== Initial pose =====
-    def publish_initial_pose(self, x: float = 0.0, y: float = 0.0, yaw_rad: float = 0.0):
+    def _update_path_frame_origin(self):
+        """現在のロボット位置を取得し、Path Frameの原点として更新する"""
+        current_pose, current_orientation = self._get_robot_pose(from_frame=self.map_frame_id)
+        if current_pose is not None:
+            self.path_frame_origin_pose = current_pose
+            self.path_frame_origin_orientation = current_orientation
+            # self.get_logger().info("Path frame origin updated.")
+
+    def _broadcast_path_frame_loop(self):
+        """Path FrameをTFツリーに配信し続ける"""
+        while rclpy.ok():
+            if (self.path_frame_origin_pose is not None and 
+                self.path_frame_origin_orientation is not None):
+                
+                t = TransformStamped()
+                t.header.stamp = self.get_clock().now().to_msg()
+                t.header.frame_id = self.map_frame_id
+                t.child_frame_id = self.path_frame_id
+                t.transform.translation = self.path_frame_origin_pose
+                t.transform.rotation = self.path_frame_origin_orientation
+                self.tf_broadcaster.sendTransform(t)
+            
+            self.path_frame_rate.sleep()
+
+    def _get_robot_pose(self, from_frame: str):
+        """指定フレームから見たロボット(base_link)の位置姿勢を取得"""
+        try:
+            # 最新のTransformを取得
+            tf = self.tf_buffer.lookup_transform(
+                from_frame,
+                self.base_frame_id,
+                rclpy.time.Time()
+            )
+            return tf.transform.translation, tf.transform.rotation
+        except TransformException as ex:
+            # 頻繁に出るとログが汚れるため Warn レベルで抑制しても良い
+            self.get_logger().warn(f"TF lookup failed: {ex}")
+            return None, None
+
+    def _distance_2d(self, p1, p2):
+        return math.sqrt((p1.x - p2.x)**2 + (p1.y - p2.y)**2)
+
+    # =========================================================================
+    # Periodic Tasks
+    # =========================================================================
+
+    def _auto_publish_initial_pose(self):
+        """起動直後に初期位置(0,0,0)をPublishする（RViz初期化用）"""
+        time.sleep(1.0) # システム安定待ち
+        for _ in range(3):
+            self.publish_initial_pose(0.0, 0.0, 0.0)
+            self._update_path_frame_origin()
+            time.sleep(0.5)
+
+    def _periodic_path_publish(self):
+        """定期的にパスをRVizにPublishする（再接続時対策）"""
+        time.sleep(2.0)
+        # Note: path生成は軽いのでここで都度呼んでも良いし、キャッシュしても良い
+        path_A, path_B, path_C = make_path(self.path_frame_id)
+        while rclpy.ok():
+            try:
+                self.publish_paths_and_labels(path_A, path_B, path_C)
+                time.sleep(0.5)
+            except Exception:
+                time.sleep(1.0)
+
+    def publish_initial_pose(self, x: float, y: float, yaw_rad: float):
+        """/initialpose トピックを発行（Nav2のリセット等に使用）"""
         msg = PoseWithCovarianceStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = self._frame_id
+        msg.header.frame_id = self.map_frame_id
         msg.pose.pose.position.x = x
         msg.pose.pose.position.y = y
         _, _, qz, qw = yaw_to_quat(yaw_rad)
         msg.pose.pose.orientation.z = qz
         msg.pose.pose.orientation.w = qw
-
-        cov = [0.0] * 36
-        cov[0] = 0.0
-        cov[7] = 0.0
-        cov[35] = 0.0
-        msg.pose.covariance = cov
-
+        
+        # 共分散行列（対角成分のみ設定など、必要に応じて）
+        msg.pose.covariance = [0.0] * 36
         self._initpose_pub.publish(msg)
-        self.get_logger().info(f"Published initial pose at ({x:.2f}, {y:.2f}, yaw={yaw_rad:.2f} rad) in frame '{self._frame_id}'")
 
-    def _auto_publish_initial_pose(self):
-        time.sleep(0.5)
-        for _ in range(3):
-            self.publish_initial_pose(0.0, 0.0, 0.0)
-            time.sleep(0.5)
 
-    def _periodic_path_publish(self):
-        time.sleep(2.0)  # 初期化待ち
-        path_A, path_B, path_C = make_path(self._frame_id)
-        while rclpy.ok():
-            try:
-                self.publish_paths_and_labels(path_A, path_B, path_C)
-                time.sleep(1.0)
-            except Exception as e:
-                self.get_logger().warn(f"Periodic path publish failed: {e}")
-                time.sleep(5.0)
-
-    # ===== follow_path action =====
-    def send_path(self, path_msg: Path, controller_id: str, goal_checker_id: str):
-        if not self._client.wait_for_server(timeout_sec=2.0):
-            raise RuntimeError("`/follow_path` action server not available.")
-
-        goal = FollowPath.Goal()
-        goal.path = path_msg
-        goal.controller_id = controller_id
-        goal.goal_checker_id = goal_checker_id
-
-        with self._traj_lock:
-            self._active_traj = controller_id
-            # 手法切替時はその手法の軌跡をクリアして「新しい走行」として描く
-            self._traj_points[controller_id] = []
-            self._recording = True
-
-        send_future = self._client.send_goal_async(goal, feedback_callback=self._feedback_cb)
-
-        def _goal_response_cb(fut):
-            self._current_goal_handle = fut.result()
-            if not self._current_goal_handle.accepted:
-                self.get_logger().warn('Goal rejected by controller_server.')
-                # 受理されなかったら記録OFFに戻す
-                with self._traj_lock:
-                    self._recording = False
-                return
-            self.get_logger().info(f'Goal accepted by controller "{controller_id}".')
-            self._current_goal_handle.get_result_async().add_done_callback(self._result_cb)
-
-        send_future.add_done_callback(_goal_response_cb)
-
-    def cancel_current_goal(self):
-        gh = self._current_goal_handle
-        if gh is None:
-            self.get_logger().info('No active goal to cancel.')
-            return
-        cancel_future = gh.cancel_goal_async()
-        cancel_future.add_done_callback(lambda _: self.get_logger().info('Cancel request sent.'))
-        # キャンセルしたら記録OFF
-        with self._traj_lock:
-            self._recording = False
-
-    def _feedback_cb(self, feedback_msg):
-        self.get_logger().debug(f'Feedback: {feedback_msg}')
-
-    def _result_cb(self, fut):
-        # ゴール終了で必ず記録OFF
-        with self._traj_lock:
-            self._recording = False
-
-        try:
-            result = fut.result().result
-            status = fut.result().status
-            self.get_logger().info(f'Result received. status={status}, result={result}')
-        except Exception as e:
-            self.get_logger().warn(f'Result callback error: {e}')
-
+# ==========================================
+# GUI Class (Tkinter)
+# ==========================================
 
 class AppGUI:
-    def __init__(self, node: FollowPathClient, paths_dict: dict, frame_id: str):
+    """Tkinterベースの操作盤"""
+    
+    # Constants for Styles
+    FONT_L = ("Arial", 20)
+    FONT_L_BOLD = ("Arial", 20, "bold")
+    
+    def __init__(self, node: FollowPathClient, paths_dict: dict):
         self.node = node
         self.paths_dict = paths_dict
-        self.frame_id = frame_id
-
         self.root = tk.Tk()
+        self._setup_window()
+        self._create_widgets()
+
+    def _setup_window(self):
         self.root.title("FollowPath GUI (Nav2)")
-        self.root.geometry("800x400")
+        self.root.geometry("800x450")
+        self.root.option_add("*Font", self.FONT_L)
+
+    def _create_widgets(self):
+        # 1. Controller Selection
+        frm_ctrl = tk.Frame(self.root)
+        frm_ctrl.pack(pady=15)
         
-        # Set larger default font for the whole application
-        default_font = ("Arial", 20)
-        self.root.option_add("*Font", default_font)
-
-        tk.Label(self.root, text=f"frame_id: {self.frame_id}", font=("Arial", 20)).pack(pady=8)
-
-        frm = tk.Frame(self.root); frm.pack(pady=8)
-
-        tk.Label(frm, text="Controller:", font=("Arial", 20)).grid(row=0, column=0, sticky="e")
+        tk.Label(frm_ctrl, text="Controller:").pack(side=tk.LEFT, padx=5)
+        
         self.controller_var = tk.StringVar(value="PP")
-        self.controller_cb = ttk.Combobox(frm, textvariable=self.controller_var,
-                                          values=["PP", "APP", "RPP", "DWPP"], state="readonly", width=10, font=("Arial", 20, "bold"))
-        self.controller_cb.grid(row=0, column=1, padx=6)
+        controllers = ["PP", "APP", "RPP", "DWPP"]
+        cb = ttk.Combobox(frm_ctrl, textvariable=self.controller_var, 
+                          values=controllers, state="readonly", width=10, 
+                          font=self.FONT_L_BOLD)
+        cb.pack(side=tk.LEFT, padx=5)
 
-        self.goal_checker_id = "general_goal_checker"
+        # 2. Control Buttons (Update / Clear)
+        frm_btns = tk.Frame(self.root)
+        frm_btns.pack(pady=10)
+        
+        tk.Button(frm_btns, text="Update Path Origin", font=self.FONT_L_BOLD, 
+                  command=self._on_update_path_origin).pack(side=tk.LEFT, padx=10)
+        tk.Button(frm_btns, text="Clear Trajectory", font=self.FONT_L_BOLD, 
+                  command=self._on_clear_traj).pack(side=tk.LEFT, padx=10)
 
-        # Buttons row
-        btn_row = tk.Frame(self.root); btn_row.pack(pady=(8, 12))
-        tk.Button(btn_row, text="Clear Trajectory", font=("Arial", 20, "bold"), command=self._on_clear_traj).grid(row=0, column=1, padx=8)
+        # 3. Path Selection Buttons
+        tk.Label(self.root, text="Select Path to Start").pack(pady=(20, 5))
+        frm_paths = tk.Frame(self.root)
+        frm_paths.pack()
 
-        tk.Label(self.root, text="Paths", font=("Arial", 20)).pack(pady=(10, 4))
-        btns = tk.Frame(self.root); btns.pack()
+        # Grid layout for path buttons
+        keys = list(self.paths_dict.keys())
+        for i, name in enumerate(keys):
+            tk.Button(frm_paths, text=name, width=20, font=self.FONT_L_BOLD,
+                      command=lambda n=name: self._on_send(n)).grid(
+                          row=i // 2, column=i % 2, padx=10, pady=10)
 
-        for i, name in enumerate(self.paths_dict.keys()):
-            tk.Button(btns, text=name, width=20, font=("Arial", 20, "bold"),
-                      command=lambda n=name: self._on_send(n)).grid(row=i // 2, column=i % 2, padx=8, pady=8)
+        # 4. Cancel Button
+        tk.Button(self.root, text="STOP / CANCEL", font=self.FONT_L_BOLD, 
+                  fg="red", command=self._on_cancel).pack(pady=20)
 
-        tk.Button(self.root, text="Cancel", font=("Arial", 20, "bold"), command=self._on_cancel).pack(pady=(12, 8))
-
-        # 初回：PathとラベルをPublish
-        self.node.publish_paths_and_labels(
-            self.paths_dict["Path A (45 deg)"],
-            self.paths_dict["Path B (90 deg)"],
-            self.paths_dict["Path C (135 deg)"],
-        )
-
-    def _on_set_initial_pose(self):
-        try:
-            self.node.publish_initial_pose(0.0, 0.0, 0.0)
-        except Exception as e:
-            messagebox.showerror("Error", str(e))
-
+    # --- GUI Events ---
     def _on_clear_traj(self):
-        try:
-            self.node.clear_trajectory()
-        except Exception as e:
-            messagebox.showerror("Error", str(e))
+        self.node.clear_trajectory()
+
+    def _on_update_path_origin(self):
+        self.node._update_path_frame_origin()
+        messagebox.showinfo("Info", "Path origin updated to current robot pose.")
 
     def _on_send(self, path_name: str):
+        ctrl_id = self.controller_var.get()
+        # Goal Checker IDは必要に応じて変更可能
+        goal_checker = "general_goal_checker"
+        
+        self.node.get_logger().info(f"UI: Send '{path_name}' with '{ctrl_id}'")
         try:
-            controller_id = self.controller_var.get()
             path_msg = self.paths_dict[path_name]
-            self.node.get_logger().info(f"Sending path '{path_name}' using controller '{controller_id}'")
-            self.node.send_path(path_msg, controller_id, self.goal_checker_id)
+            self.node.send_path(path_msg, ctrl_id, goal_checker)
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
@@ -514,28 +721,41 @@ class AppGUI:
         self.root.mainloop()
 
 
+# ==========================================
+# Main Entry Point
+# ==========================================
+
 def main():
     rclpy.init()
 
-    frame_id = "map"
+    # パス生成 (基準フレーム: start_pose)
+    # 実行時に tf によって map座標系へ変換されるため、ここではローカル定義でOK
+    frame_id = "start_pose"
     path_A, path_B, path_C = make_path(frame_id)
 
-    paths = {
+    paths_registry = {
         "Path A (45 deg)": path_A,
         "Path B (90 deg)": path_B,
         "Path C (135 deg)": path_C,
     }
 
-    node = FollowPathClient(frame_id=frame_id)
-    # === 安全な executor / spin ===
+    # ノード作成
+    node = FollowPathClient(path_frame_id=frame_id)
+
+    # Executorの設定 (ROSコールバックとGUIの共存のためMultiThreaded)
     executor = MultiThreadedExecutor()
     executor.add_node(node)
+    
+    # ROSスレッドの開始
     spin_thread = threading.Thread(target=executor.spin, daemon=True)
     spin_thread.start()
 
     try:
-        gui = AppGUI(node, paths, frame_id)
+        # GUI起動 (Main Thread)
+        gui = AppGUI(node, paths_registry)
         gui.run()
+    except KeyboardInterrupt:
+        pass
     finally:
         node.destroy_node()
         rclpy.shutdown()
