@@ -841,6 +841,7 @@ def main():
     # 実行時に tf によって map座標系へ変換されるため、ここではローカル定義でOK
     frame_id = "start_pose"
     path_A, path_B, path_C = make_path(frame_id)
+    # path_A, path_B, path_C = make_iso_path(frame_id)
 
     paths_registry = {
         "Path A (45 deg)": path_A,
