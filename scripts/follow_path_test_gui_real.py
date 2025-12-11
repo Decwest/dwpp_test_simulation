@@ -42,6 +42,7 @@ from rclpy.qos import (
 # --- ROS 2 Messages ---
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist, TransformStamped
 from nav_msgs.msg import Path, Odometry
+from sensor_msgs.msg import BatteryState, Imu
 from nav2_msgs.action import FollowPath
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import Bool
@@ -165,6 +166,14 @@ class FollowPathClient(Node):
         self.current_cmd_vel_nav = None  # Control Server出力
         self.current_cmd_vel = None      # Nav2最終出力
         self.current_velocity_violation = False
+        self.battery_voltage = float('nan')
+        self.battery_current = float('nan')
+        self.imu_angular_vel_x = float('nan')
+        self.imu_angular_vel_y = float('nan')
+        self.imu_angular_vel_z = float('nan')
+        self.imu_linear_acc_x = float('nan')
+        self.imu_linear_acc_y = float('nan')
+        self.imu_linear_acc_z = float('nan')
 
         # --- QoS Settings ---
         # RVizで「後からSubscribeしても見える」ようにするための設定
@@ -198,6 +207,10 @@ class FollowPathClient(Node):
             Twist, '/cmd_vel', self._cmd_vel_callback, 1)
         self._velocity_violation_sub = self.create_subscription(
             Bool, '/constraints_violation_flag', self._velocity_violation_callback, 1)
+        self.battery_state_sub = self.create_subscription(
+            BatteryState, '/whill/states/battery_state', self._battery_state_callback, 1)
+        self.imu_sub = self.create_subscription(
+            Imu, '/ouster/imu', self._imu_callback, 1)
 
         # --- Background Threads & Timers ---
         # 1. 起動時の初期位置合わせ & パス可視化 (別スレッドで実行)
@@ -215,6 +228,20 @@ class FollowPathClient(Node):
     # =========================================================================
     # Callbacks (Subscribers)
     # =========================================================================
+
+    def _imu_callback(self, msg: Imu):
+        # header = msg.header.frame_id
+        # print(header)
+        self.imu_angular_vel_x = msg.angular_velocity.x
+        self.imu_angular_vel_y = msg.angular_velocity.y
+        self.imu_angular_vel_z = msg.angular_velocity.z
+        self.imu_linear_acc_x = msg.linear_acceleration.x
+        self.imu_linear_acc_y = msg.linear_acceleration.y
+        self.imu_linear_acc_z = msg.linear_acceleration.z
+
+    def _battery_state_callback(self, msg: BatteryState):
+        self.battery_voltage = msg.voltage
+        self.battery_current = msg.current
 
     def _on_odom(self, msg: Odometry):
         self.current_odom = msg
@@ -235,9 +262,12 @@ class FollowPathClient(Node):
     def _reset_record_buffer(self):
         """記録用バッファを初期化"""
         self.record_state_dict = {
-            "t": [], "x": [], "y": [], "yaw": [], 
-            "v": [], "w": [], 
+            "sec": [], "nsec": [], "x": [], "y": [], "yaw": [], 
             "v_cmd": [], "w_cmd": [], 
+            "battery_v": [], "battery_i": [],
+            "v_real": [], "w_real": [], 
+            "imu_ax": [], "imu_ay": [], "imu_az": [],
+            "imu_vx": [], "imu_vy": [], "imu_vz": [],
             "v_nav": [], "w_nav": [], 
             "velocity_violation": []
         }
@@ -273,17 +303,19 @@ class FollowPathClient(Node):
                 yaw = r.as_euler('xyz')[2]
                 
                 # 時間
-                t_now = self.get_clock().now().nanoseconds * 1e-9
+                sec = self.get_clock().now().nanoseconds * 1e-9
+                nsec = self.get_clock().now().nanoseconds % 1e9
 
                 # --- バッファへ追加 ---
                 d = self.record_state_dict
-                d["t"].append(t_now)
+                d["sec"].append(sec)
+                d["nsec"].append(nsec)
                 d["x"].append(current_pose.x)
                 d["y"].append(current_pose.y)
                 d["yaw"].append(yaw)
                 # 実測値
-                d["v"].append(self.current_odom.twist.twist.linear.x)
-                d["w"].append(self.current_odom.twist.twist.angular.z)
+                d["v_real"].append(self.current_odom.twist.twist.linear.x)
+                d["w_real"].append(self.current_odom.twist.twist.angular.z)
                 # 指令値 (Control Server)
                 d["v_cmd"].append(self.current_cmd_vel_nav.linear.x)
                 d["w_cmd"].append(self.current_cmd_vel_nav.angular.z)
@@ -292,6 +324,16 @@ class FollowPathClient(Node):
                 d["w_nav"].append(self.current_cmd_vel.angular.z)
                 # フラグ
                 d["velocity_violation"].append(self.current_velocity_violation)
+                # バッテリーデータ
+                d["battery_v"].append(self.battery_voltage)
+                d["battery_i"].append(self.battery_current)
+                # IMUデータ
+                d["imu_ax"].append(self.imu_linear_acc_x)
+                d["imu_ay"].append(self.imu_linear_acc_y)
+                d["imu_az"].append(self.imu_linear_acc_z)
+                d["imu_vx"].append(self.imu_angular_vel_x)
+                d["imu_vy"].append(self.imu_angular_vel_y)
+                d["imu_vz"].append(self.imu_angular_vel_z)
                 
             else:
                 # 記録停止中かつバッファにデータがある場合 -> CSV保存
