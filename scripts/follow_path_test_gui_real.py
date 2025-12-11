@@ -78,19 +78,19 @@ def make_path(frame_id: str) -> tuple:
 
     for theta in theta_list:
         # 1. 直進 (0 -> 1m)
-        x1 = np.linspace(0, 1, 100)
+        x1 = np.arange(0, 1, 0.01)
         y1 = np.zeros_like(x1)
         
         # 2. 斜め直線 (角度thetaで長さl)
         # Note: 実際には直線補間だが、ここでは簡易的に生成
-        x2 = np.linspace(1.0, 1.0 + l_segment * math.cos(theta), 100)
-        y2 = np.linspace(0.0, l_segment * math.sin(theta), 100)
+        x2 = np.arange(1.0, 1.0 + l_segment * math.cos(theta), 0.01)
+        y2 = np.arange(0.0, l_segment * math.sin(theta), 0.01)
         
         # 3. 終端直進 (さらに3m進む)
-        x3 = np.linspace(
+        x3 = np.arange(
             1.0 + l_segment * math.cos(theta), 
             4.0 + l_segment * math.cos(theta), 
-            100
+            0.01
         )
         y3 = np.ones_like(x3) * l_segment * math.sin(theta)
 
@@ -121,6 +121,67 @@ def make_path(frame_id: str) -> tuple:
     # 展開して返す
     return (paths[0], paths[1], paths[2])
 
+def make_iso_path(frame_id: str) -> tuple:
+    """
+    実験用の規定パスを生成する関数
+    Returns:
+        (path_A, path_B, path_C): 生成された3種類のPathメッセージ
+    """
+    paths = []
+    
+    Lu = 0.985
+    
+    # Path A: 5*Luだけ直進
+    x_A = np.arange(0, 5*Lu, 0.01)
+    y_A = np.zeros_like(x_A)
+    
+    # Path B: 一辺5Luの正方形
+    x_B1 = np.arange(0, 5*Lu, 0.01)
+    y_B1 = np.zeros_like(x_B1)
+    y_B2 = np.arange(0, -5*Lu, 0.01)
+    x_B2 = np.ones_like(y_B2) * 5 * Lu
+    x_B3 = np.arange(5*Lu, 0, 0.01)
+    y_B3 = np.ones_like(x_B3) * -5 * Lu
+    y_B4 = np.arange(-5*Lu, 0, 0.01)
+    x_B4 = np.zeros_like(y_B4)
+    x_B = np.concatenate([x_B1, x_B2, x_B3, x_B4])
+    y_B = np.concatenate([y_B1, y_B2, y_B3, y_B4])
+    
+    # Path C: 直進+円弧
+    x_C1 = np.arange(0, 5*Lu, 0.01)
+    y_C1 = np.zeros_like(x_C1)
+    theta_list = np.arange(0, np.pi/2, 0.01/(5*Lu))
+    x_C2 = 5*Lu*(1+np.sin(theta_list))
+    y_C2 = 5*Lu*(np.cos(theta_list)-1)
+    x_C = np.concatenate([x_C1, x_C2])
+    y_C = np.concatenate([y_C1, y_C2])
+    
+    x_list = [x_A, x_B, x_C]
+    y_list = [y_A, y_B, y_C]
+    
+    for xs, ys in zip(x_list, y_list):
+        # 方位角(Yaw)の計算
+        dx = np.gradient(xs)
+        dy = np.gradient(ys)
+        yaws = np.unwrap(np.arctan2(dy, dx))
+
+        # Pathメッセージの作成
+        path = Path()
+        path.header.frame_id = frame_id
+        
+        for x, y, yaw in zip(xs, ys, yaws):
+            ps = PoseStamped()
+            ps.header.frame_id = frame_id
+            ps.pose.position.x = float(x)
+            ps.pose.position.y = float(y)
+            _, _, qz, qw = yaw_to_quat(yaw)
+            ps.pose.orientation.z = qz
+            ps.pose.orientation.w = qw
+            path.poses.append(ps)
+        paths.append(path)
+    
+    # 展開して返す
+    return (paths[0], paths[1], paths[2])
 
 # ==========================================
 # Main ROS 2 Node Class
