@@ -31,16 +31,18 @@ import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
 from rclpy.executors import MultiThreadedExecutor
+from rclpy.parameter import Parameter
 from rclpy.qos import (
     QoSProfile,
     QoSHistoryPolicy,
     QoSReliabilityPolicy,
     QoSDurabilityPolicy,
-    qos_profile_sensor_data
+    qos_profile_sensor_data,
+    ReliabilityPolicy
 )
 
 # --- ROS 2 Messages ---
-from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist, TransformStamped
+from geometry_msgs.msg import Point, PoseStamped, PoseWithCovarianceStamped, Twist, TransformStamped
 from nav_msgs.msg import Path, Odometry
 from sensor_msgs.msg import BatteryState, Imu
 from nav2_msgs.action import FollowPath
@@ -132,7 +134,7 @@ class FollowPathClient(Node):
     """
     def __init__(self, path_frame_id: str = "start_pose"):
         super().__init__('follow_path_gui_client')
-        
+
         # --- Parameters ---
         self.path_frame_id = path_frame_id
         self.record_frequency = self.declare_parameter('record_frequency', 30).value
@@ -183,6 +185,9 @@ class FollowPathClient(Node):
             history=QoSHistoryPolicy.KEEP_LAST,
             durability=QoSDurabilityPolicy.TRANSIENT_LOCAL
         )
+        
+        qos = QoSProfile(depth=10)
+        qos.reliability = ReliabilityPolicy.BEST_EFFORT
 
         # --- TF Components ---
         self.tf_buffer = Buffer()
@@ -210,7 +215,7 @@ class FollowPathClient(Node):
         self.battery_state_sub = self.create_subscription(
             BatteryState, '/whill/states/battery_state', self._battery_state_callback, 1)
         self.imu_sub = self.create_subscription(
-            Imu, '/ouster/imu', self._imu_callback, 1)
+            Imu, '/ouster/imu', self._imu_callback, qos)
 
         # --- Background Threads & Timers ---
         # 1. 起動時の初期位置合わせ & パス可視化 (別スレッドで実行)
@@ -487,10 +492,11 @@ class FollowPathClient(Node):
             return
         
         pts = self._traj_points[self._active_traj]
+        current_point = Point(x=current_pos.x, y=current_pos.y, z=current_pos.z)
         
         # 点の間引き (前回から5cm以上移動していたら追加)
-        if not pts or self._distance_2d(pts[-1], current_pos) > 0.05:
-            pts.append(current_pos)
+        if not pts or self._distance_2d(pts[-1], current_point) > 0.05:
+            pts.append(current_point)
             # メモリ節約のため上限を設定
             if len(pts) > 5000:
                 self._traj_points[self._active_traj] = pts[-2000:]
@@ -654,9 +660,9 @@ class FollowPathClient(Node):
         while rclpy.ok():
             try:
                 self.publish_paths_and_labels(path_A, path_B, path_C)
-                time.sleep(0.5)
+                time.sleep(0.2)
             except Exception:
-                time.sleep(1.0)
+                time.sleep(0.2)
 
     def publish_initial_pose(self, x: float, y: float, yaw_rad: float):
         """/initialpose トピックを発行（Nav2のリセット等に使用）"""
