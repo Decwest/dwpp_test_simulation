@@ -80,20 +80,18 @@ def make_path(frame_id: str) -> tuple:
 
     for theta in theta_list:
         # 1. 直進 (0 -> 1m)
-        x1 = np.arange(0, 1, 0.01)
+        x1 = np.linspace(0, 1, 100)
         y1 = np.zeros_like(x1)
         
         # 2. 斜め直線 (角度thetaで長さl)
         # Note: 実際には直線補間だが、ここでは簡易的に生成
-        x2 = np.arange(1.0, 1.0 + l_segment * math.cos(theta), 0.01)
-        y2 = np.arange(0.0, l_segment * math.sin(theta), 0.01)
+        x2 = np.linspace(1.0, 1.0 + l_segment * math.cos(theta), 300)
+        y2 = np.linspace(0.0, l_segment * math.sin(theta), 300)
         
         # 3. 終端直進 (さらに3m進む)
-        x3 = np.arange(
+        x3 = np.linspace(
             1.0 + l_segment * math.cos(theta), 
-            4.0 + l_segment * math.cos(theta), 
-            0.01
-        )
+            4.0 + l_segment * math.cos(theta), 300)
         y3 = np.ones_like(x3) * l_segment * math.sin(theta)
 
         # 結合
@@ -134,25 +132,25 @@ def make_iso_path(frame_id: str) -> tuple:
     Lu = 0.985
     
     # Path A: 5*Luだけ直進
-    x_A = np.arange(0, 5*Lu, 0.01)
+    x_A = np.linspace(0, 5*Lu, 500)
     y_A = np.zeros_like(x_A)
     
     # Path B: 一辺5Luの正方形
-    x_B1 = np.arange(0, 5*Lu, 0.01)
+    x_B1 = np.linspace(0, 5*Lu, 500)
     y_B1 = np.zeros_like(x_B1)
-    y_B2 = np.arange(0, -5*Lu, 0.01)
+    y_B2 = np.linspace(0, -5*Lu, 500)
     x_B2 = np.ones_like(y_B2) * 5 * Lu
-    x_B3 = np.arange(5*Lu, 0, 0.01)
+    x_B3 = np.linspace(5*Lu, 0, 500)
     y_B3 = np.ones_like(x_B3) * -5 * Lu
-    y_B4 = np.arange(-5*Lu, 0, 0.01)
+    y_B4 = np.linspace(-5*Lu, 0, 500)
     x_B4 = np.zeros_like(y_B4)
     x_B = np.concatenate([x_B1, x_B2, x_B3, x_B4])
     y_B = np.concatenate([y_B1, y_B2, y_B3, y_B4])
     
     # Path C: 直進+円弧
-    x_C1 = np.arange(0, 5*Lu, 0.01)
+    x_C1 = np.linspace(0, 5*Lu, 500)
     y_C1 = np.zeros_like(x_C1)
-    theta_list = np.arange(0, np.pi/2, 0.01/(5*Lu))
+    theta_list = np.linspace(0, np.pi/2, 500)
     x_C2 = 5*Lu*(1+np.sin(theta_list))
     y_C2 = 5*Lu*(np.cos(theta_list)-1)
     x_C = np.concatenate([x_C1, x_C2])
@@ -231,6 +229,7 @@ class FollowPathClient(Node):
         self.current_velocity_violation = False
         self.battery_voltage = float('nan')
         self.battery_current = float('nan')
+        self.battery_percent = float('nan')
         self.imu_angular_vel_x = float('nan')
         self.imu_angular_vel_y = float('nan')
         self.imu_angular_vel_z = float('nan')
@@ -330,7 +329,7 @@ class FollowPathClient(Node):
         self.record_state_dict = {
             "sec": [], "nsec": [], "x": [], "y": [], "yaw": [], 
             "v_cmd": [], "w_cmd": [], 
-            "battery_v": [], "battery_i": [],
+            "battery_v": [], "battery_i": [], "battery_percent": [],
             "v_real": [], "w_real": [], 
             "imu_ax": [], "imu_ay": [], "imu_az": [],
             "imu_vx": [], "imu_vy": [], "imu_vz": [],
@@ -393,6 +392,7 @@ class FollowPathClient(Node):
                 # バッテリーデータ
                 d["battery_v"].append(self.battery_voltage)
                 d["battery_i"].append(self.battery_current)
+                d["battery_percent"].append(self.battery_percent)
                 # IMUデータ
                 d["imu_ax"].append(self.imu_linear_acc_x)
                 d["imu_ay"].append(self.imu_linear_acc_y)
@@ -717,7 +717,8 @@ class FollowPathClient(Node):
         """定期的にパスをRVizにPublishする（再接続時対策）"""
         time.sleep(2.0)
         # Note: path生成は軽いのでここで都度呼んでも良いし、キャッシュしても良い
-        path_A, path_B, path_C = make_path(self.path_frame_id)
+        # path_A, path_B, path_C = make_path(self.path_frame_id)
+        path_A, path_B, path_C = make_iso_path(self.path_frame_id)
         while rclpy.ok():
             try:
                 self.publish_paths_and_labels(path_A, path_B, path_C)
@@ -840,8 +841,8 @@ def main():
     # パス生成 (基準フレーム: start_pose)
     # 実行時に tf によって map座標系へ変換されるため、ここではローカル定義でOK
     frame_id = "start_pose"
-    path_A, path_B, path_C = make_path(frame_id)
-    # path_A, path_B, path_C = make_iso_path(frame_id)
+    # path_A, path_B, path_C = make_path(frame_id)
+    path_A, path_B, path_C = make_iso_path(frame_id)
 
     paths_registry = {
         "Path A (45 deg)": path_A,
