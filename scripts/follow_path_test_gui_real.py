@@ -32,6 +32,7 @@ from rclpy.node import Node
 from rclpy.action import ActionClient
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.parameter import Parameter
+from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.qos import (
     QoSProfile,
     QoSHistoryPolicy,
@@ -203,12 +204,17 @@ class FollowPathClient(Node):
         self.experiment_name = self.declare_parameter('experiment_name', 'dwpp').value  # dwpp or nelson
 
         # --- Internal State Variables ---
+        self._reentrant_group = ReentrantCallbackGroup()
         self._current_goal_handle = None
         self.path_frame_origin_pose = None
         self.path_frame_origin_orientation = None
         self._recording = False
         self._active_traj = None  # 現在実行中の制御手法名(PP, APP等)
         self._traj_lock = threading.Lock()
+        self._controller_id = None
+        self._recording_timer_busy = False
+        self._path_publish_ready_at = time.time() + 2.0  # 初期化猶予
+        self._path_publish_paths = make_iso_path(self.path_frame_id)
 
         # データ記録用バッファ
         self._reset_record_buffer()
@@ -280,15 +286,23 @@ class FollowPathClient(Node):
         # --- Background Threads & Timers ---
         # 1. 起動時の初期位置合わせ & パス可視化 (別スレッドで実行)
         threading.Thread(target=self._auto_publish_initial_pose, daemon=True).start()
-        threading.Thread(target=self._periodic_path_publish, daemon=True).start()
+        self._path_publish_timer = self.create_timer(
+            0.2, self._periodic_path_publish, callback_group=self._reentrant_group
+        )
 
         # 2. データ記録ループ (Timer)
-        self.record_rate = self.create_rate(self.record_frequency)
-        threading.Thread(target=self._recording_loop, daemon=True).start()
+        self.record_timer = self.create_timer(
+            1.0 / float(self.record_frequency),
+            self._recording_loop,
+            callback_group=self._reentrant_group
+        )
 
         # 3. Path FrameのTF配信ループ (Timer)
-        self.path_frame_rate = self.create_rate(100)  # 100 Hz
-        threading.Thread(target=self._broadcast_path_frame_loop, daemon=True).start()
+        self.path_frame_timer = self.create_timer(
+            0.01,  # 100 Hz
+            self._broadcast_path_frame_loop,
+            callback_group=self._reentrant_group
+        )
 
     # =========================================================================
     # Callbacks (Subscribers)
@@ -339,23 +353,26 @@ class FollowPathClient(Node):
 
     def _recording_loop(self):
         """
-        データ記録用スレッド
-        _recordingフラグがTrueの間、状態をリストに追加し、FalseになったらCSV保存する
+        データ記録用Timerコールバック。
+        _recordingフラグがTrueの間、状態をリストに追加し、FalseになったらCSV保存する。
         """
-        while rclpy.ok():
+        if self._recording_timer_busy:
+            return  # 前回処理がまだ終わっていない場合はスキップ
+        self._recording_timer_busy = True
+
+        try:
             # 必要なデータが揃うまでスキップ
             if (self.current_cmd_vel_nav is None or 
                 self.current_cmd_vel is None or 
                 self.current_odom is None):
-                self.record_rate.sleep()
-                continue
+                return
             
             if self._recording:
                 # --- データ取得 ---
                 # 現在位置 (path_frame基準)
                 current_pose, current_orientation = self._get_robot_pose(from_frame=self.path_frame_id)
                 if current_pose is None:
-                    continue
+                    return
 
                 # RViz軌跡更新
                 self._draw_robot_trajectory(current_pose, self.path_frame_id)
@@ -406,14 +423,14 @@ class FollowPathClient(Node):
                 if len(self.record_state_dict["x"]) > 0:
                     self._save_to_csv()
                     self._reset_record_buffer()
-                
-            self.record_rate.sleep()
+        finally:
+            self._recording_timer_busy = False
 
     def _save_to_csv(self):
         """記録したバッファをCSVファイルに書き出す"""
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         dir_name = f"{self.data_dir}/{self.experiment_name}"
-        filename = f"{dir_name}/{self._active_traj}_{timestamp}.csv"
+        filename = f"{dir_name}/{self._active_traj}_{self._controller_id}_{timestamp}.csv"
         
         if not os.path.exists(dir_name):
             os.makedirs(dir_name, exist_ok=True)
@@ -668,20 +685,18 @@ class FollowPathClient(Node):
             # self.get_logger().info("Path frame origin updated.")
 
     def _broadcast_path_frame_loop(self):
-        """Path FrameをTFツリーに配信し続ける"""
-        while rclpy.ok():
-            if (self.path_frame_origin_pose is not None and 
-                self.path_frame_origin_orientation is not None):
-                
-                t = TransformStamped()
-                t.header.stamp = self.get_clock().now().to_msg()
-                t.header.frame_id = self.map_frame_id
-                t.child_frame_id = self.path_frame_id
-                t.transform.translation = self.path_frame_origin_pose
-                t.transform.rotation = self.path_frame_origin_orientation
-                self.tf_broadcaster.sendTransform(t)
-            
-            self.path_frame_rate.sleep()
+        """Path FrameをTFツリーに配信する (Timerコールバック)"""
+        if (self.path_frame_origin_pose is None or 
+            self.path_frame_origin_orientation is None):
+            return
+
+        t = TransformStamped()
+        t.header.stamp = self.get_clock().now().to_msg()
+        t.header.frame_id = self.map_frame_id
+        t.child_frame_id = self.path_frame_id
+        t.transform.translation = self.path_frame_origin_pose
+        t.transform.rotation = self.path_frame_origin_orientation
+        self.tf_broadcaster.sendTransform(t)
 
     def _get_robot_pose(self, from_frame: str):
         """指定フレームから見たロボット(base_link)の位置姿勢を取得"""
@@ -715,16 +730,15 @@ class FollowPathClient(Node):
 
     def _periodic_path_publish(self):
         """定期的にパスをRVizにPublishする（再接続時対策）"""
-        time.sleep(2.0)
-        # Note: path生成は軽いのでここで都度呼んでも良いし、キャッシュしても良い
-        # path_A, path_B, path_C = make_path(self.path_frame_id)
-        path_A, path_B, path_C = make_iso_path(self.path_frame_id)
-        while rclpy.ok():
-            try:
-                self.publish_paths_and_labels(path_A, path_B, path_C)
-                time.sleep(0.2)
-            except Exception:
-                time.sleep(0.2)
+        if time.time() < self._path_publish_ready_at:
+            return
+
+        try:
+            path_A, path_B, path_C = self._path_publish_paths
+            self.publish_paths_and_labels(path_A, path_B, path_C)
+        except Exception as exc:
+            # 軽くワーニングに留める（再実行で復帰するケースが多い）
+            self.get_logger().warn(f"Path publish failed: {exc}")
 
     def publish_initial_pose(self, x: float, y: float, yaw_rad: float):
         """/initialpose トピックを発行（Nav2のリセット等に使用）"""
@@ -813,14 +827,14 @@ class AppGUI:
         messagebox.showinfo("Info", "Path origin updated to current robot pose.")
 
     def _on_send(self, path_name: str):
-        ctrl_id = self.controller_var.get()
+        self._controller_id = self.controller_var.get()
         # Goal Checker IDは必要に応じて変更可能
         goal_checker = "general_goal_checker"
         
-        self.node.get_logger().info(f"UI: Send '{path_name}' with '{ctrl_id}'")
+        self.node.get_logger().info(f"UI: Send '{path_name}' with '{self._controller_id}'")
         try:
             path_msg = self.paths_dict[path_name]
-            self.node.send_path(path_msg, ctrl_id, goal_checker)
+            self.node.send_path(path_msg, self._controller_id, goal_checker)
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
