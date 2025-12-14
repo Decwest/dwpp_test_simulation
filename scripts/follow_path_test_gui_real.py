@@ -210,6 +210,7 @@ class FollowPathClient(Node):
         self.path_frame_origin_orientation = None
         self._recording = False
         self._active_traj = None  # 現在実行中の制御手法名(PP, APP等)
+        self.path_name = None # 現在実行中のパス名
         self._traj_lock = threading.Lock()
         self._record_lock = threading.Lock()
         self._controller_id = None
@@ -217,6 +218,8 @@ class FollowPathClient(Node):
         self._path_publish_ready_at = time.time() + 2.0  # 初期化猶予
         self._path_publish_paths = make_path(self.path_frame_id)
         # self._path_publish_paths = make_iso_path(self.path_frame_id)
+        self.current_pose = None
+        self.current_orientation = None
 
         # データ記録用バッファ
         self._reset_record_buffer()
@@ -291,6 +294,13 @@ class FollowPathClient(Node):
         self._path_publish_timer = self.create_timer(
             0.2, self._periodic_path_publish, callback_group=self._reentrant_group
         )
+        
+        # ロボットの位置取得用Timer
+        self._get_robot_pose_timer = self.create_timer(
+            1.0 / 60.0,  # 0.01 Hz (ほぼ無限待機)
+            self._get_robot_pose_loop,
+            callback_group=self._reentrant_group
+        )
 
         # 2. データ記録ループ (Timer)
         self.record_timer = self.create_timer(
@@ -308,7 +318,7 @@ class FollowPathClient(Node):
 
         # 3. Path FrameのTF配信ループ (Timer)
         self.path_frame_timer = self.create_timer(
-            0.01,  # 100 Hz
+            0.001,  # 1000 Hz
             self._broadcast_path_frame_loop,
             callback_group=self._reentrant_group
         )
@@ -316,6 +326,16 @@ class FollowPathClient(Node):
     # =========================================================================
     # Callbacks (Subscribers)
     # =========================================================================
+
+    def _get_robot_pose_loop(self):
+        """ロボットの現在位置をpath_frame基準で取得"""
+        current_pose, current_orientation = self._get_robot_pose(from_frame=self.path_frame_id)
+        if current_pose is None:
+            return
+        
+        self.current_pose = current_pose
+        self.current_orientation = current_orientation
+        
 
     def _imu_callback(self, msg: Imu):
         # header = msg.header.frame_id
@@ -378,15 +398,11 @@ class FollowPathClient(Node):
         with self._record_lock:
             if self._recording:
                 # --- データ取得 ---
-                # 現在位置 (path_frame基準)
-                current_pose, current_orientation = self._get_robot_pose(from_frame=self.path_frame_id)
-                if current_pose is None:
-                    return
 
                 # 姿勢(Yaw)計算
                 r = R.from_quat([
-                    current_orientation.x, current_orientation.y, 
-                    current_orientation.z, current_orientation.w
+                    self.current_orientation.x, self.current_orientation.y, 
+                    self.current_orientation.z, self.current_orientation.w
                 ])
                 yaw = r.as_euler('xyz')[2]
                 
@@ -399,8 +415,8 @@ class FollowPathClient(Node):
                 d = self.record_state_dict
                 d["sec"].append(sec)
                 d["nsec"].append(nsec)
-                d["x"].append(current_pose.x)
-                d["y"].append(current_pose.y)
+                d["x"].append(self.current_pose.x)
+                d["y"].append(self.current_pose.y)
                 d["yaw"].append(yaw)
                 # 実測値
                 d["v_real"].append(self.current_odom.twist.twist.linear.x)
@@ -431,12 +447,10 @@ class FollowPathClient(Node):
                         field: values.copy()
                         for field, values in self.record_state_dict.items()
                     }
-                    snapshot_traj = self._active_traj
-                    snapshot_controller = self._controller_id
                     self._reset_record_buffer()
 
         if data_snapshot is not None:
-            self._save_to_csv(data_snapshot, snapshot_traj, snapshot_controller)
+            self._save_to_csv(data_snapshot, self.path_name, self._controller_id)
         # finally:
         #     self._recording_timer_busy = False
 
@@ -467,8 +481,9 @@ class FollowPathClient(Node):
     # Action Client Logic (FollowPath)
     # =========================================================================
 
-    def send_path(self, path_msg: Path, controller_id: str, goal_checker_id: str):
+    def send_path(self, path_msg: Path, path_name: str, controller_id: str, goal_checker_id: str):
         """指定されたパスをNav2に送信する"""
+        self.path_name = path_name
         if not self._client.wait_for_server(timeout_sec=2.0):
             self.get_logger().error("Action server `/follow_path` not available.")
             return
@@ -588,12 +603,11 @@ class FollowPathClient(Node):
         if active_traj is None:
             return
 
-        current_pose, _ = self._get_robot_pose(from_frame=self.path_frame_id)
-        if current_pose is None:
+        if self.current_pose is None:
             return
 
         with self._traj_lock:
-            self._draw_robot_trajectory(current_pose, self.path_frame_id, active_traj)
+            self._draw_robot_trajectory(self.current_pose, self.path_frame_id, active_traj)
 
     def _draw_robot_trajectory(self, current_pos, frame_id, traj_name=None):
         """ロボットの軌跡をMarkerArrayとしてPublish"""
@@ -867,7 +881,7 @@ class AppGUI:
         self.node.get_logger().info(f"UI: Send '{path_name}' with '{self._controller_id}'")
         try:
             path_msg = self.paths_dict[path_name]
-            self.node.send_path(path_msg, self._controller_id, goal_checker)
+            self.node.send_path(path_msg, path_name, self._controller_id, goal_checker)
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
