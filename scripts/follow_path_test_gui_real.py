@@ -211,10 +211,12 @@ class FollowPathClient(Node):
         self._recording = False
         self._active_traj = None  # 現在実行中の制御手法名(PP, APP等)
         self._traj_lock = threading.Lock()
+        self._record_lock = threading.Lock()
         self._controller_id = None
         self._recording_timer_busy = False
         self._path_publish_ready_at = time.time() + 2.0  # 初期化猶予
-        self._path_publish_paths = make_iso_path(self.path_frame_id)
+        self._path_publish_paths = make_path(self.path_frame_id)
+        # self._path_publish_paths = make_iso_path(self.path_frame_id)
 
         # データ記録用バッファ
         self._reset_record_buffer()
@@ -297,6 +299,13 @@ class FollowPathClient(Node):
             callback_group=self._reentrant_group
         )
 
+        # 2.5 軌跡描画ループ (Timer, 別スレッドで実行)
+        self._traj_draw_timer = self.create_timer(
+            0.1,  # 10 Hzで軌跡更新
+            self._trajectory_draw_loop,
+            callback_group=self._reentrant_group
+        )
+
         # 3. Path FrameのTF配信ループ (Timer)
         self.path_frame_timer = self.create_timer(
             0.01,  # 100 Hz
@@ -356,17 +365,17 @@ class FollowPathClient(Node):
         データ記録用Timerコールバック。
         _recordingフラグがTrueの間、状態をリストに追加し、FalseになったらCSV保存する。
         """
-        if self._recording_timer_busy:
-            return  # 前回処理がまだ終わっていない場合はスキップ
-        self._recording_timer_busy = True
+        # 必要なデータが揃うまでスキップ
+        if (self.current_cmd_vel_nav is None or 
+            self.current_cmd_vel is None or 
+            self.current_odom is None):
+            return
 
-        try:
-            # 必要なデータが揃うまでスキップ
-            if (self.current_cmd_vel_nav is None or 
-                self.current_cmd_vel is None or 
-                self.current_odom is None):
-                return
-            
+        data_snapshot = None
+        snapshot_traj = None
+        snapshot_controller = None
+
+        with self._record_lock:
             if self._recording:
                 # --- データ取得 ---
                 # 現在位置 (path_frame基準)
@@ -374,9 +383,6 @@ class FollowPathClient(Node):
                 if current_pose is None:
                     return
 
-                # RViz軌跡更新
-                self._draw_robot_trajectory(current_pose, self.path_frame_id)
-                
                 # 姿勢(Yaw)計算
                 r = R.from_quat([
                     current_orientation.x, current_orientation.y, 
@@ -385,8 +391,9 @@ class FollowPathClient(Node):
                 yaw = r.as_euler('xyz')[2]
                 
                 # 時間
-                sec = self.get_clock().now().nanoseconds * 1e-9
-                nsec = self.get_clock().now().nanoseconds % 1e9
+                now_ns = self.get_clock().now().nanoseconds
+                sec = now_ns * 1e-9
+                nsec = now_ns % 1e9
 
                 # --- バッファへ追加 ---
                 d = self.record_state_dict
@@ -417,32 +424,41 @@ class FollowPathClient(Node):
                 d["imu_vx"].append(self.imu_angular_vel_x)
                 d["imu_vy"].append(self.imu_angular_vel_y)
                 d["imu_vz"].append(self.imu_angular_vel_z)
-                
             else:
                 # 記録停止中かつバッファにデータがある場合 -> CSV保存
                 if len(self.record_state_dict["x"]) > 0:
-                    self._save_to_csv()
+                    data_snapshot = {
+                        field: values.copy()
+                        for field, values in self.record_state_dict.items()
+                    }
+                    snapshot_traj = self._active_traj
+                    snapshot_controller = self._controller_id
                     self._reset_record_buffer()
-        finally:
-            self._recording_timer_busy = False
 
-    def _save_to_csv(self):
+        if data_snapshot is not None:
+            self._save_to_csv(data_snapshot, snapshot_traj, snapshot_controller)
+        # finally:
+        #     self._recording_timer_busy = False
+
+    def _save_to_csv(self, data_snapshot: dict, traj_name: str, controller_id: str):
         """記録したバッファをCSVファイルに書き出す"""
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         dir_name = f"{self.data_dir}/{self.experiment_name}"
-        filename = f"{dir_name}/{self._active_traj}_{self._controller_id}_{timestamp}.csv"
+        traj_label = traj_name or "None"
+        controller_label = controller_id or "None"
+        filename = f"{dir_name}/{traj_label}_{controller_label}_{timestamp}.csv"
         
         if not os.path.exists(dir_name):
             os.makedirs(dir_name, exist_ok=True)
             
         with open(filename, 'w', newline='') as csvfile:
-            fieldnames = list(self.record_state_dict.keys())
+            fieldnames = list(data_snapshot.keys())
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             writer.writeheader()
             
-            data_len = len(self.record_state_dict["x"])
+            data_len = len(data_snapshot["x"])
             for i in range(data_len):
-                row = {field: self.record_state_dict[field][i] for field in fieldnames}
+                row = {field: data_snapshot[field][i] for field in fieldnames}
                 writer.writerow(row)
                 
         self.get_logger().info(f"Saved trajectory data to '{filename}'")
@@ -564,12 +580,28 @@ class FollowPathClient(Node):
     # Visualization & TF Logic
     # =========================================================================
 
-    def _draw_robot_trajectory(self, current_pos, frame_id):
+    def _trajectory_draw_loop(self):
+        """別タイマースレッドでロボット軌跡を描画"""
+        with self._traj_lock:
+            active_traj = self._active_traj
+
+        if active_traj is None:
+            return
+
+        current_pose, _ = self._get_robot_pose(from_frame=self.path_frame_id)
+        if current_pose is None:
+            return
+
+        with self._traj_lock:
+            self._draw_robot_trajectory(current_pose, self.path_frame_id, active_traj)
+
+    def _draw_robot_trajectory(self, current_pos, frame_id, traj_name=None):
         """ロボットの軌跡をMarkerArrayとしてPublish"""
-        if self._active_traj not in self._traj_points:
+        target_traj = traj_name if traj_name is not None else self._active_traj
+        if target_traj not in self._traj_points:
             return
         
-        pts = self._traj_points[self._active_traj]
+        pts = self._traj_points[target_traj]
         current_point = Point(x=current_pos.x, y=current_pos.y, z=current_pos.z)
         
         # 点の間引き (前回から5cm以上移動していたら追加)
@@ -623,7 +655,8 @@ class FollowPathClient(Node):
             
             m = Marker()
             m.header.frame_id = path.header.frame_id
-            m.header.stamp = now
+            m.header.stamp.sec = 0
+            m.header.stamp.nanosec = 0
             m.ns = 'path_visualization'
             m.id = mid
             m.type = Marker.LINE_STRIP
@@ -855,8 +888,8 @@ def main():
     # パス生成 (基準フレーム: start_pose)
     # 実行時に tf によって map座標系へ変換されるため、ここではローカル定義でOK
     frame_id = "start_pose"
-    # path_A, path_B, path_C = make_path(frame_id)
-    path_A, path_B, path_C = make_iso_path(frame_id)
+    path_A, path_B, path_C = make_path(frame_id)
+    # path_A, path_B, path_C = make_iso_path(frame_id)
 
     paths_registry = {
         "Path A (45 deg)": path_A,
