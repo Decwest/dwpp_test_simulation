@@ -246,8 +246,8 @@ class FollowPathClient(Node):
         self.current_quat_start = None  # geometry_msgs/Quaternion
 
         # ローカル経路（実験条件）
-        self._local_paths = make_path(self.local_path_frame_id)
-        # self._local_paths = make_iso_path(self.local_path_frame_id)
+        # self._local_paths = make_path(self.local_path_frame_id)
+        self._local_paths = make_iso_path(self.local_path_frame_id)
 
         # データ記録用バッファ
         self._reset_record_buffer()
@@ -1027,13 +1027,13 @@ def main():
 
     # ローカル経路生成（ロボット原点基準）
     local_frame = "local_path"
-    local_A, local_B, local_C = make_path(local_frame)
-    # local_A, local_B, local_C = make_iso_path(local_frame)
+    # local_A, local_B, local_C = make_path(local_frame)
+    local_A, local_B, local_C = make_iso_path(local_frame)
 
     local_paths_registry = {
-        "Path A (45 deg)": local_A,
-        "Path B (90 deg)": local_B,
-        "Path C (135 deg)": local_C,
+        "Path A": local_A,
+        "Path B": local_B,
+        "Path C": local_C,
     }
 
     node = FollowPathClient(local_path_frame_id=local_frame)
