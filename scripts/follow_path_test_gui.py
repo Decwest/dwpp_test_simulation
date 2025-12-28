@@ -102,10 +102,10 @@ class FollowPathClient(Node):
 
         # 手法→色マップ（R,G,B）
         self._traj_colors = {
-            'PP':   (1.0, 0.0, 0.0),   # red
-            'APP':  (0.0, 0.7, 0.2),   # green
-            'RPP':  (0.0, 0.4, 1.0),   # blue
-            'DWPP': (0.8, 0.2, 0.8)    # purple
+            'PP':   (0.0, 0.0, 1.0),   # blue
+            'APP':  (0.0, 1.0, 0.0),   # green
+            'RPP':  (1.0, 1.0, 0.0),   # yellow
+            'DWPP': (1.0, 0.0, 0.0)    # red
         }
 
         # 走行中のみ記録するためのフラグ
