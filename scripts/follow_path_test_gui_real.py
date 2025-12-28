@@ -102,18 +102,18 @@ def make_path(frame_id: str) -> tuple:
     l_segment = 3.0
 
     for theta in theta_list:
-        # 1. 直進 0->1m
-        x1 = np.linspace(0, 1, 100)
+        # 1. 直進 0->3m
+        x1 = np.linspace(0, 3, 300)
         y1 = np.zeros_like(x1)
 
         # 2. 斜め直線
-        x2 = np.linspace(1.0, 1.0 + l_segment * math.cos(theta), 300)
+        x2 = np.linspace(3.0, 3.0 + l_segment * math.cos(theta), 300)
         y2 = np.linspace(0.0, l_segment * math.sin(theta), 300)
 
         # 3. 終端直進
         x3 = np.linspace(
-            1.0 + l_segment * math.cos(theta),
-            4.0 + l_segment * math.cos(theta),
+            3.0 + l_segment * math.cos(theta),
+            6.0 + l_segment * math.cos(theta),
             300,
         )
         y3 = np.ones_like(x3) * l_segment * math.sin(theta)
@@ -332,11 +332,11 @@ class FollowPathClient(Node):
         )
 
         # データ記録
-        self.record_timer = self.create_timer(
-            1.0 / float(self.record_frequency),
-            self._recording_loop,
-            callback_group=self._reentrant_group,
-        )
+        # self.record_timer = self.create_timer(
+        #     1.0 / float(self.record_frequency),
+        #     self._recording_loop,
+        #     callback_group=self._reentrant_group,
+        # )
 
         # 軌跡描画
         self._traj_draw_timer = self.create_timer(
@@ -998,7 +998,7 @@ class AppGUI:
 
     def _on_send(self, path_name: str):
         controller_id = self.controller_var.get()
-        goal_checker = "general_goal_checker"
+        goal_checker = "goal_checker"
 
         self.node.get_logger().info(f"UI: Send '{path_name}' with '{controller_id}'")
 
