@@ -102,18 +102,18 @@ def make_path(frame_id: str) -> tuple:
     l_segment = 3.0
 
     for theta in theta_list:
-        # 1. 直進 0->1m
-        x1 = np.linspace(0, 1, 100)
+        # 1. 直進 0->3m
+        x1 = np.linspace(0, 3, 300)
         y1 = np.zeros_like(x1)
 
         # 2. 斜め直線
-        x2 = np.linspace(1.0, 1.0 + l_segment * math.cos(theta), 300)
+        x2 = np.linspace(3.0, 3.0 + l_segment * math.cos(theta), 300)
         y2 = np.linspace(0.0, l_segment * math.sin(theta), 300)
 
         # 3. 終端直進
         x3 = np.linspace(
-            1.0 + l_segment * math.cos(theta),
-            4.0 + l_segment * math.cos(theta),
+            3.0 + l_segment * math.cos(theta),
+            6.0 + l_segment * math.cos(theta),
             300,
         )
         y3 = np.ones_like(x3) * l_segment * math.sin(theta)
@@ -255,10 +255,10 @@ class FollowPathClient(Node):
         # 軌跡描画用点列（map）
         self._traj_points = {"PP": [], "APP": [], "RPP": [], "DWPP": []}
         self._traj_colors = {
-            "PP": (1.0, 0.0, 0.0),
-            "APP": (0.0, 0.7, 0.2),
-            "RPP": (0.0, 0.4, 1.0),
-            "DWPP": (0.8, 0.2, 0.8),
+            "PP": (0.0, 0.0, 1.0),
+            "APP": (0.0, 0.5, 0.0),
+            "RPP": (1.0, 0.647, 0.0),
+            "DWPP": (1.0, 0.0, 0.0),
         }
 
         # 受信データキャッシュ
@@ -324,19 +324,15 @@ class FollowPathClient(Node):
             0.2, self._periodic_path_publish, callback_group=self._reentrant_group
         )
 
-        # ロボット姿勢更新（map listen + start計算）
-        self._get_robot_pose_timer = self.create_timer(
-            1.0 / 60.0,
-            self._get_robot_pose_loop,
-            callback_group=self._reentrant_group,
-        )
+        # ロボット姿勢更新は必要なタイミングで取得する（常時タイマは使わない）
+        self._get_robot_pose_timer = None
 
         # データ記録
-        self.record_timer = self.create_timer(
-            1.0 / float(self.record_frequency),
-            self._recording_loop,
-            callback_group=self._reentrant_group,
-        )
+        # self.record_timer = self.create_timer(
+        #     1.0 / float(self.record_frequency),
+        #     self._recording_loop,
+        #     callback_group=self._reentrant_group,
+        # )
 
         # 軌跡描画
         self._traj_draw_timer = self.create_timer(
@@ -380,24 +376,25 @@ class FollowPathClient(Node):
     # Pose Update (map listen + start conversion)
     # =========================================================================
 
-    def _get_robot_pose_loop(self):
+    def _update_robot_pose_cache(self) -> bool:
         """ロボットの現在姿勢を map で取得し、start_pose基準（数値）も更新"""
         pose_map, quat_map = self._get_robot_pose(from_frame=self.map_frame_id)
         if pose_map is None:
-            return
+            return False
 
         self.current_pose_map = pose_map
         self.current_quat_map = quat_map
 
         # start_origin が未設定なら start基準は計算できない
         if self.start_origin_t_map is None or self.start_origin_r_map is None:
-            return
+            return True
 
         t_rel, r_rel = self._transform_map_pose_to_start(pose_map, quat_map)
 
         self.current_pose_start = Point(x=float(t_rel[0]), y=float(t_rel[1]), z=float(t_rel[2]))
         q = r_rel.as_quat()
         self.current_quat_start = Quaternion(x=float(q[0]), y=float(q[1]), z=float(q[2]), w=float(q[3]))
+        return True
 
     def _get_robot_pose(self, from_frame: str):
         """指定フレームから見たロボット(base_frame_id)の位置姿勢を取得"""
@@ -450,27 +447,27 @@ class FollowPathClient(Node):
         t0 = self.start_origin_t_map
         r0 = self.start_origin_r_map
 
-        map_path = copy.deepcopy(local_path)
+        map_path = Path()
         map_path.header.frame_id = self.map_frame_id
 
-        for ps in map_path.poses:
+        for ps in local_path.poses:
             p_local = np.array([ps.pose.position.x, ps.pose.position.y, ps.pose.position.z], dtype=float)
             p_map = r0.apply(p_local) + t0
-            ps.pose.position.x = float(p_map[0])
-            ps.pose.position.y = float(p_map[1])
-            ps.pose.position.z = float(p_map[2])
-
             ql = ps.pose.orientation
             r_local = R.from_quat([ql.x, ql.y, ql.z, ql.w])
             r_map = r0 * r_local
             q_map = r_map.as_quat()
 
-            ps.pose.orientation.x = float(q_map[0])
-            ps.pose.orientation.y = float(q_map[1])
-            ps.pose.orientation.z = float(q_map[2])
-            ps.pose.orientation.w = float(q_map[3])
-
-            ps.header.frame_id = self.map_frame_id
+            ps_map = PoseStamped()
+            ps_map.header.frame_id = self.map_frame_id
+            ps_map.pose.position.x = float(p_map[0])
+            ps_map.pose.position.y = float(p_map[1])
+            ps_map.pose.position.z = float(p_map[2])
+            ps_map.pose.orientation.x = float(q_map[0])
+            ps_map.pose.orientation.y = float(q_map[1])
+            ps_map.pose.orientation.z = float(q_map[2])
+            ps_map.pose.orientation.w = float(q_map[3])
+            map_path.poses.append(ps_map)
 
         return map_path
 
@@ -516,6 +513,8 @@ class FollowPathClient(Node):
         False になったらCSV保存。
         """
         if self.current_cmd_vel_nav is None or self.current_cmd_vel is None or self.current_odom is None:
+            return
+        if not self._update_robot_pose_cache():
             return
         if self.current_pose_start is None or self.current_quat_start is None:
             return
@@ -688,9 +687,9 @@ class FollowPathClient(Node):
         """map座標で定義されたパス3本とラベルを表示（サンプル）"""
         markers = MarkerArray()
         path_configs = [
-            (map_path_A, (1.0, 0.0, 0.0), "Path A"),
-            (map_path_B, (0.0, 1.0, 0.0), "Path B"),
-            (map_path_C, (0.0, 0.0, 1.0), "Path C"),
+            (map_path_A, (1.0, 0.0, 0.0), "PathA"),
+            (map_path_B, (0.0, 1.0, 0.0), "PathB"),
+            (map_path_C, (0.0, 0.0, 1.0), "PathC"),
         ]
         now = self.get_clock().now().to_msg()
 
@@ -708,7 +707,7 @@ class FollowPathClient(Node):
             m.id = mid
             m.type = Marker.LINE_STRIP
             m.action = Marker.ADD
-            m.scale.x = 0.05
+            m.scale.x = 0.020
             m.color.r = color[0]
             m.color.g = color[1]
             m.color.b = color[2]
@@ -735,10 +734,10 @@ class FollowPathClient(Node):
                 m.pose.position.x = float(path.poses[-1].pose.position.x + 0.1)
                 m.pose.position.y = float(path.poses[-1].pose.position.y + 0.1)
                 m.pose.position.z = 0.3
-            m.scale.z = 0.25
-            m.color.r = 1.0
-            m.color.g = 1.0
-            m.color.b = 1.0
+            m.scale.z = 0.50
+            m.color.r = 0.0
+            m.color.g = 0.0
+            m.color.b = 0.0
             m.color.a = 1.0
             m.text = name
             labels.markers.append(m)
@@ -756,12 +755,12 @@ class FollowPathClient(Node):
         m.id = 0
         m.type = Marker.LINE_STRIP
         m.action = Marker.ADD
-        m.scale.x = 0.06
-        # 黄色
-        m.color.r = 1.0
-        m.color.g = 1.0
+        m.scale.x = 0.05
+        # 黒色
+        m.color.r = 0.0
+        m.color.g = 0.0
         m.color.b = 0.0
-        m.color.a = 1.0
+        m.color.a = 0.5
 
         for ps in map_path.poses:
             m.points.append(ps.pose.position)
@@ -776,9 +775,12 @@ class FollowPathClient(Node):
 
         if active_traj is None:
             return
-        if self.current_pose_map is None:
+        if not self._update_robot_pose_cache():
             return
 
+        if not self._recording:
+            return
+        
         with self._traj_lock:
             self._draw_robot_trajectory_map(self.current_pose_map, active_traj)
 
@@ -787,7 +789,11 @@ class FollowPathClient(Node):
             return
 
         pts = self._traj_points[traj_name]
-        current_point = Point(x=current_pos_map.x, y=current_pos_map.y, z=current_pos_map.z)
+        if self.start_origin_t_map is None or self.start_origin_r_map is None:
+            return
+
+        t_rel, _ = self._transform_map_pose_to_start(current_pos_map, self.current_quat_map)
+        current_point = Point(x=float(t_rel[0]), y=float(t_rel[1]), z=float(t_rel[2]))
 
         if not pts or self._distance_2d(pts[-1], current_point) > 0.02:
             pts.append(current_point)
@@ -812,12 +818,12 @@ class FollowPathClient(Node):
             mid += 1
             m.type = Marker.LINE_STRIP
             m.action = Marker.ADD
-            m.scale.x = 0.035
+            m.scale.x = 0.040
             m.color.r = r
             m.color.g = g
             m.color.b = b
             m.color.a = 0.95
-            m.points = copy.deepcopy(points)
+            m.points = [self._transform_start_point_to_map(p) for p in points]
             marr.markers.append(m)
 
         self._traj_pub.publish(marr)
@@ -841,6 +847,14 @@ class FollowPathClient(Node):
     def _distance_2d(self, p1, p2):
         return math.sqrt((p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2)
 
+    def _transform_start_point_to_map(self, point_start: Point) -> Point:
+        """start_origin基準の点を map に変換（描画用）"""
+        t0 = self.start_origin_t_map
+        r0 = self.start_origin_r_map
+        p_local = np.array([point_start.x, point_start.y, point_start.z], dtype=float)
+        p_map = r0.apply(p_local) + t0
+        return Point(x=float(p_map[0]), y=float(p_map[1]), z=float(p_map[2]))
+
     # =========================================================================
     # Periodic tasks
     # =========================================================================
@@ -857,6 +871,11 @@ class FollowPathClient(Node):
         ローカル経路を「現在のロボット姿勢を原点」として map に載せ替えた形で表示する。
         ※送信時にも同様に載せ替えるので、普段の目視確認用
         """
+        with self._traj_lock:
+            # if not self._recording:
+            #     return
+            pass
+
         if time.time() < self._path_publish_ready_at:
             return
         
@@ -874,27 +893,27 @@ class FollowPathClient(Node):
 
     def _transform_local_path_to_map_path_with_given_origin(self, local_path: Path, t0: np.ndarray, r0: R) -> Path:
         """可視化用：任意の(t0,r0)で local_path を map_path に変換"""
-        map_path = copy.deepcopy(local_path)
+        map_path = Path()
         map_path.header.frame_id = self.map_frame_id
 
-        for ps in map_path.poses:
+        for ps in local_path.poses:
             p_local = np.array([ps.pose.position.x, ps.pose.position.y, ps.pose.position.z], dtype=float)
             p_map = r0.apply(p_local) + t0
-            ps.pose.position.x = float(p_map[0])
-            ps.pose.position.y = float(p_map[1])
-            ps.pose.position.z = float(p_map[2])
-
             ql = ps.pose.orientation
             r_local = R.from_quat([ql.x, ql.y, ql.z, ql.w])
             r_map = r0 * r_local
             q_map = r_map.as_quat()
 
-            ps.pose.orientation.x = float(q_map[0])
-            ps.pose.orientation.y = float(q_map[1])
-            ps.pose.orientation.z = float(q_map[2])
-            ps.pose.orientation.w = float(q_map[3])
-
-            ps.header.frame_id = self.map_frame_id
+            ps_map = PoseStamped()
+            ps_map.header.frame_id = self.map_frame_id
+            ps_map.pose.position.x = float(p_map[0])
+            ps_map.pose.position.y = float(p_map[1])
+            ps_map.pose.position.z = float(p_map[2])
+            ps_map.pose.orientation.x = float(q_map[0])
+            ps_map.pose.orientation.y = float(q_map[1])
+            ps_map.pose.orientation.z = float(q_map[2])
+            ps_map.pose.orientation.w = float(q_map[3])
+            map_path.poses.append(ps_map)
 
         return map_path
 
@@ -998,7 +1017,7 @@ class AppGUI:
 
     def _on_send(self, path_name: str):
         controller_id = self.controller_var.get()
-        goal_checker = "general_goal_checker"
+        goal_checker = "goal_checker"
 
         self.node.get_logger().info(f"UI: Send '{path_name}' with '{controller_id}'")
 
