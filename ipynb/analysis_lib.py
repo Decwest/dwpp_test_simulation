@@ -110,13 +110,13 @@ iso_reference_path = {
 def calc_violation_rate(violation_flags) -> float:
     violation_count = np.sum(violation_flags)
     total_count = len(violation_flags)
-    violation_rate = violation_count / total_count
+    violation_rate = violation_count / total_count * 100
     return violation_rate
 
 from scipy.spatial.distance import cdist
 
 # Calculate RMSE between robot path and reference path
-def calc_rmse(robot_path: np.ndarray, path: np.ndarray) -> float:
+def calc_tracking_error(robot_path: np.ndarray, path: np.ndarray) -> float:
 
     # Compute the distances between each point on the robot trajectory and each point on the path at once (using scipy's cdist)
     # distance_matrix has shape = (number of points in the robot trajectory, number of points in the path)
@@ -124,9 +124,15 @@ def calc_rmse(robot_path: np.ndarray, path: np.ndarray) -> float:
 
     # Take the minimum along the row direction to extract the minimum distance for each robot point
     min_distances = np.min(distance_matrix, axis=1)
+    
+    return min_distances
+
+def calc_rmse(robot_path: np.ndarray, path: np.ndarray) -> float:
+
+    tracking_errors = calc_tracking_error(robot_path, path)
 
     # Compute RMSE
-    rmse = np.sqrt(np.mean(min_distances**2))
+    rmse = np.sqrt(np.mean(tracking_errors**2))
     
     return rmse
 
