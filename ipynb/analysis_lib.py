@@ -176,9 +176,10 @@ def plot_velocity_profile(t, v_real, w_real, v_cmd, w_cmd, path_name, controller
 
 
 # Plot dynamic window
-def plot_dynamic_window(curvatures, vs, ws, next_vs, next_ws, dw_max_vs, dw_min_vs, dw_max_ws, dw_min_ws, actual_vs, actual_ws, v_regs, path_name, controller_name):
-    base_dir = '/home/decwest/decwest_workspace/dwpp_test_simulation/data/dwpp/DynamicWindow'
-    os.makedirs(f'{base_dir}/{path_name}/{controller_name}', exist_ok=True)
+def plot_dynamic_window(curvatures, vs, ws, next_vs, next_ws, dw_max_vs, dw_min_vs, dw_max_ws, dw_min_ws, actual_vs, actual_ws, v_regs, path_name, controller_name, base_dir=Path('/home/decwest/decwest_workspace/dwpp_test_simulation/data/dwpp/DynamicWindow')):
+    
+    save_dir = base_dir/ "DynamicWindow"
+    os.makedirs(save_dir, exist_ok=True)
     
     for idx, (curvature, v, w, next_v, next_w, dw_max_v, dw_min_v, dw_max_w, dw_min_w, actual_v, actual_w, v_reg) \
         in enumerate(zip(curvatures, vs, ws, next_vs, next_ws, dw_max_vs, dw_min_vs, dw_max_ws, dw_min_ws, actual_vs, actual_ws, v_regs)):
@@ -212,12 +213,12 @@ def plot_dynamic_window(curvatures, vs, ws, next_vs, next_ws, dw_max_vs, dw_min_
         
         ax.set_xlabel('Linear Velocity [m/s]')
         ax.set_ylabel('Angular Velocity [rad/s]')
-        ax.set_xlim(-0.1, 0.6)
-        ax.set_ylim(-1.2, 1.2)
+        ax.set_xlim(-0.1, 0.3)
+        ax.set_ylim(-0.5, 1.6)
         ax.grid(True, alpha=0.3)
         # ax.set_aspect('equal')
         # plt.legend()
-        plt.savefig(f'{base_dir}/{path_name}/{controller_name}/{idx}.png', dpi=300, bbox_inches='tight')
+        plt.savefig(save_dir / f'{idx}.png', dpi=300, bbox_inches='tight')
         # plt.show()
         plt.close()
 
