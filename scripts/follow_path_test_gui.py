@@ -33,15 +33,24 @@ def yaw_to_quat(z_yaw_rad: float):
 def make_path(frame_id: str):
     paths = []
     theta_list = [np.pi/4, np.pi/2, 3*np.pi/4]
-    l = 3.0
+    l_segment = 3.0
 
     for theta in theta_list:
-        x1 = np.linspace(0, 1, 100);           y1 = np.zeros_like(x1)
-        x2 = np.linspace(1.0, 1.0+l*math.cos(theta), 100)
-        y2 = np.linspace(0.0, l*math.sin(theta), 100)
-        x3 = np.linspace(1.0+l*math.cos(theta), 4.0+l*math.cos(theta), 100)
-        y3 = np.ones_like(x3) * l * math.sin(theta)
+        x1 = np.linspace(0, 3, 300)
+        y1 = np.zeros_like(x1)
+        
+        # 2. 斜め直線 (角度thetaで長さl)
+        # Note: 実際には直線補間だが、ここでは簡易的に生成
+        x2 = np.linspace(3.0, 3.0 + l_segment * math.cos(theta), 300)
+        y2 = np.linspace(0.0, l_segment * math.sin(theta), 300)
+        
+        # 3. 終端直進 (さらに3m進む)
+        x3 = np.linspace(
+            3.0 + l_segment * math.cos(theta), 
+            6.0 + l_segment * math.cos(theta), 300)
+        y3 = np.ones_like(x3) * l_segment * math.sin(theta)
 
+        # 結合
         xs = np.concatenate([x1, x2, x3])
         ys = np.concatenate([y1, y2, y3])
         dx = np.gradient(xs); dy = np.gradient(ys)
