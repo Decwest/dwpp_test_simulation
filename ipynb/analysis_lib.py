@@ -9,6 +9,10 @@ from collections import defaultdict
 
 plt.rcParams['font.family'] = 'Times New Roman'
 plt.rcParams['font.size'] = 12
+plt.rcParams['mathtext.fontset'] = 'stix'   # ← 重要
+plt.rcParams['mathtext.rm'] = 'Times New Roman'
+plt.rcParams['mathtext.it'] = 'Times New Roman:italic'
+plt.rcParams['mathtext.bf'] = 'Times New Roman:bold'
 
 color_dict = {"PP": "blue", "APP": "green", "RPP": "orange", "DWPP": "red"}
 

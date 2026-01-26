@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 
-csv_path = Path("/home/decwest/decwest_workspace/dwpp_test_simulation/data/dwpp_20251228_01/DWPP.csv")
+csv_path = Path("/home/decwest/decwest_workspace/dwpp_test_simulation/data/dwpp/lookahead/dynamic_window_pure_pursuit_log.csv")
 
 def divide_df_to_segments(df: pd.DataFrame, t_threshold: float) -> list:
     """
